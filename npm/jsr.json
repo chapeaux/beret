@@ -1,0 +1,5 @@
+{
+  "name": "@chapeaux/beret",
+  "version": "0.1.0",
+  "exports": "./run.js"
+}

@@ -1,0 +1,38 @@
+{
+  "name": "@chapeaux/beret",
+  "version": "0.1.0",
+  "description": "MCP server that builds a SPARQL-queryable RDF knowledge graph of your codebase",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chapeaux/beret"
+  },
+  "homepage": "https://github.com/chapeaux/beret",
+  "keywords": [
+    "mcp",
+    "sparql",
+    "rdf",
+    "codebase",
+    "ast",
+    "model-context-protocol"
+  ],
+  "bin": {
+    "beret": "run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "run.js",
+    "install.js"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

@@ -1,0 +1,32 @@
+[package]
+name = "chapeaux-beret"
+version = "0.1.0"
+edition = "2024"
+description = "MCP server that builds a SPARQL-queryable RDF knowledge graph of your codebase"
+license = "MIT"
+repository = "https://github.com/chapeaux/beret"
+homepage = "https://github.com/chapeaux/beret"
+keywords = ["mcp", "sparql", "rdf", "codebase", "ast"]
+categories = ["development-tools", "command-line-utilities"]
+
+[[bin]]
+name = "beret"
+path = "src/main.rs"
+
+[dependencies]
+oxigraph = "0.5"
+tokio = { version = "1", features = ["full"] }
+rust-mcp-sdk = "0.9"
+ast-grep-core = "0.42"
+ast-grep-language = "0.42"
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
