@@ -67,7 +67,7 @@ async function main() {
 
   if (archiveExt === ".tar.gz") {
     const { execSync } = require("child_process");
-    execSync(`tar -xzf "${tmpPath}" -C "${binDir}" --strip-components=1`, { stdio: "inherit" });
+    execSync(`tar -xzf "${tmpPath}" -C "${binDir}"`, { stdio: "inherit" });
   } else {
     const { execSync } = require("child_process");
     execSync(`powershell -Command "Expand-Archive -Path '${tmpPath}' -DestinationPath '${binDir}' -Force"`, { stdio: "inherit" });
