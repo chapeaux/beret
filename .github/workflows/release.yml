@@ -89,8 +89,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Set version from tag
+        run: sed -i "s/^version = .*/version = \"${GITHUB_REF_NAME#v}\"/" Cargo.toml
       - name: Publish to crates.io
-        run: cargo publish --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+        run: cargo publish --token "${{ secrets.CARGO_REGISTRY_TOKEN }}" --allow-dirty
 
   publish-npm:
     needs: release
@@ -102,6 +104,9 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+      - name: Set version from tag
+        working-directory: npm
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
       - name: Publish to npm
         working-directory: npm
         run: npm publish --access public --provenance
