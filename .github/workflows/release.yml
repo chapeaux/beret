@@ -105,8 +105,16 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
       - name: Set version from tag
-        working-directory: npm
-        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "
+            const fs = require('fs');
+            for (const f of ['npm/package.json', 'npm/jsr.json']) {
+              const pkg = JSON.parse(fs.readFileSync(f, 'utf8'));
+              pkg.version = '$VERSION';
+              fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + '\n');
+            }
+          "
       - name: Publish to npm
         working-directory: npm
         run: npm publish --access public --provenance
