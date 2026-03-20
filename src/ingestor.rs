@@ -751,6 +751,11 @@ impl ignore::ParallelVisitor for TripleVisitor<'_> {
             return ignore::WalkState::Continue;
         }
 
+        // Skip paths with invalid UTF-8 (produces replacement char that breaks IRIs)
+        if path.to_str().is_none() {
+            return ignore::WalkState::Continue;
+        }
+
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
