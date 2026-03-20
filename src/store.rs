@@ -5,6 +5,21 @@ use serde_json::{Map, Value};
 
 const REPO_PREFIX: &str = "http://repo.example.org/";
 
+/// Percent-encode characters that are invalid in IRIs.
+fn iri_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_alphanumeric() || "-._~:@!$&'()*+,;=/".contains(c) || c > '\x7F' {
+            out.push(c);
+        } else {
+            for b in c.to_string().as_bytes() {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
 pub struct CodebaseStore {
     store: Store,
 }
@@ -56,9 +71,9 @@ impl CodebaseStore {
         predicate: &str,
         object: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let s = format!("{REPO_PREFIX}{subject}");
-        let p = format!("{REPO_PREFIX}{predicate}");
-        let o = format!("{REPO_PREFIX}{object}");
+        let s = format!("{REPO_PREFIX}{}", iri_escape(subject));
+        let p = format!("{REPO_PREFIX}{}", iri_escape(predicate));
+        let o = format!("{REPO_PREFIX}{}", iri_escape(object));
 
         let s_node = NamedNodeRef::new(&s)?;
         let p_node = NamedNodeRef::new(&p)?;
