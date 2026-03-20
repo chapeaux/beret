@@ -9,9 +9,10 @@ const REPO_PREFIX: &str = "http://repo.example.org/";
 fn iri_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_alphanumeric() || "-._~:@!$&'()*+,;=/".contains(c) || c > '\x7F' {
+        if c.is_ascii_alphanumeric() || "-._~:@!$&'()*+,;=/".contains(c) {
             out.push(c);
         } else {
+            // Percent-encode all non-ASCII and special characters
             for b in c.to_string().as_bytes() {
                 out.push_str(&format!("%{:02X}", b));
             }
