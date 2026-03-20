@@ -135,7 +135,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              <caller> repo:calls <callee>, <file> repo:dependsOn <pkg>, etc.",
             &[
                 ("sparql", "string", "A SPARQL query string"),
-                ("limit", "integer", "Maximum number of results per page (default: 500)"),
+                ("limit", "integer", "Maximum number of results per page (default: 100)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &["sparql"],
@@ -156,7 +156,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             &[
                 ("name", "string", "Symbol name to search for (partial match)"),
                 ("exclude", "string", "Comma-separated directory names to exclude from results"),
-                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("limit", "integer", "Maximum number of results per page (default: 50)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &["name"],
@@ -168,7 +168,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             &[
                 ("name", "string", "Function name to find callers of (omit for all call edges)"),
                 ("exclude", "string", "Comma-separated directory names to exclude from results"),
-                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("limit", "integer", "Maximum number of results per page (default: 50)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &[],
@@ -180,7 +180,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             &[
                 ("name", "string", "Function name to find callees of (omit for all call edges)"),
                 ("exclude", "string", "Comma-separated directory names to exclude from results"),
-                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("limit", "integer", "Maximum number of results per page (default: 50)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &[],
@@ -194,7 +194,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
                 ("path", "string", "Filter results to entries containing this path substring"),
                 ("kind", "string", "Filter to a specific kind: Function, Class, Config, Document, Binary, Stylesheet, Section, Style, Element"),
                 ("exclude", "string", "Comma-separated directory names to exclude from results"),
-                ("limit", "integer", "Maximum number of results per page (default: 200)"),
+                ("limit", "integer", "Maximum number of results per page (default: 50)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &[],
@@ -215,7 +215,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              Helps identify unused code, deprecated functions, and refactoring candidates.",
             &[
                 ("exclude", "string", "Comma-separated directory names to exclude from results"),
-                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("limit", "integer", "Maximum number of results per page (default: 50)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &[],
@@ -226,7 +226,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              (package.json dependencies, devDependencies, peerDependencies).",
             &[
                 ("exclude", "string", "Comma-separated directory names to exclude from results"),
-                ("limit", "integer", "Maximum number of results per page (default: 200)"),
+                ("limit", "integer", "Maximum number of results per page (default: 50)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &[],
@@ -237,7 +237,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              server files, and CLI handlers. Answers: 'Where does this application start?'",
             &[
                 ("exclude", "string", "Comma-separated directory names to exclude from results"),
-                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("limit", "integer", "Maximum number of results per page (default: 50)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &[],
@@ -253,7 +253,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
                 ("pattern", "string", "ast-grep pattern to search for (use $NAME for wildcards)"),
                 ("language", "string", "Language to search in: python, rust, javascript, typescript, tsx, go, java, c, cpp, csharp, ruby, php, kotlin, swift, scala, bash, lua"),
                 ("exclude", "string", "Comma-separated directory names to exclude from search"),
-                ("limit", "integer", "Maximum number of results per page (default: 200)"),
+                ("limit", "integer", "Maximum number of results per page (default: 50)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &["pattern", "language"],
@@ -271,7 +271,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
                 ("depth", "integer", "0=auto (default), 1=directories, 2=+files, 3=+functions/classes"),
                 ("code_only", "boolean", "Exclude non-code types and non-source directories like docs, tests, stories, images, dist (default: true)"),
                 ("exclude", "string", "Comma-separated directory names to exclude (e.g., 'stories,examples,demo')"),
-                ("limit", "integer", "Maximum elements to include (default: 500)"),
+                ("limit", "integer", "Maximum elements to include (default: 200)"),
             ],
             &[],
         ),
@@ -365,7 +365,30 @@ impl BeretHandler {
         })
     }
 
+    /// Strip `<http://repo.example.org/>` prefix and angle brackets from all string values.
+    fn strip_iri_prefixes(value: Value) -> Value {
+        const PREFIX: &str = "<http://repo.example.org/";
+        match value {
+            Value::String(s) => {
+                let stripped = s
+                    .strip_prefix(PREFIX)
+                    .and_then(|s| s.strip_suffix('>'))
+                    .unwrap_or(&s)
+                    .to_string();
+                Value::String(stripped)
+            }
+            Value::Array(arr) => Value::Array(arr.into_iter().map(Self::strip_iri_prefixes).collect()),
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(k, v)| (k, Self::strip_iri_prefixes(v)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
     fn ok_json(value: Value) -> std::result::Result<CallToolResult, CallToolError> {
+        let value = Self::strip_iri_prefixes(value);
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
         Ok(CallToolResult::text_content(vec![TextContent::new(
             text, None, None,
@@ -416,7 +439,12 @@ impl BeretHandler {
         match value {
             Value::Array(arr) => {
                 let total = arr.len();
-                let returned: Vec<Value> = arr.into_iter().skip(offset).take(limit).collect();
+                let returned: Vec<Value> = arr
+                    .into_iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(Self::strip_iri_prefixes)
+                    .collect();
                 let count = returned.len();
                 let has_more = offset + count < total;
 
@@ -520,7 +548,7 @@ impl ServerHandler for BeretHandler {
         match params.name.as_str() {
             "query_codebase" => {
                 let sparql = Self::require_arg(&params, "query_codebase", "sparql")?;
-                let limit = Self::get_limit(&params, 500);
+                let limit = Self::get_limit(&params, 100);
                 let offset = Self::get_offset(&params);
                 match self.store.query_to_json(sparql) {
                     Ok(v) => Self::ok_json_limited(v, limit, offset),
@@ -539,7 +567,7 @@ impl ServerHandler for BeretHandler {
             "find_symbol" => {
                 let name = Self::require_arg(&params, "find_symbol", "name")?;
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 100);
+                let limit = Self::get_limit(&params, 50);
                 let offset = Self::get_offset(&params);
                 tools::find_symbol(&self.store, name, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
@@ -548,7 +576,7 @@ impl ServerHandler for BeretHandler {
             "find_callers" => {
                 let name = Self::get_arg(&params, "name");
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 100);
+                let limit = Self::get_limit(&params, 50);
                 let offset = Self::get_offset(&params);
                 tools::find_callers(&self.store, name, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
@@ -557,7 +585,7 @@ impl ServerHandler for BeretHandler {
             "find_callees" => {
                 let name = Self::get_arg(&params, "name");
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 100);
+                let limit = Self::get_limit(&params, 50);
                 let offset = Self::get_offset(&params);
                 tools::find_callees(&self.store, name, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
@@ -567,7 +595,7 @@ impl ServerHandler for BeretHandler {
                 let path = Self::get_arg(&params, "path");
                 let kind = Self::get_arg(&params, "kind");
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 200);
+                let limit = Self::get_limit(&params, 50);
                 let offset = Self::get_offset(&params);
                 tools::list_structures(&self.store, path, kind, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
@@ -581,7 +609,7 @@ impl ServerHandler for BeretHandler {
 
             "find_dead_code" => {
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 100);
+                let limit = Self::get_limit(&params, 50);
                 let offset = Self::get_offset(&params);
                 tools::find_dead_code(&self.store, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
@@ -589,7 +617,7 @@ impl ServerHandler for BeretHandler {
 
             "find_dependencies" => {
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 200);
+                let limit = Self::get_limit(&params, 50);
                 let offset = Self::get_offset(&params);
                 tools::find_dependencies(&self.store, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
@@ -597,7 +625,7 @@ impl ServerHandler for BeretHandler {
 
             "find_entry_points" => {
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 100);
+                let limit = Self::get_limit(&params, 50);
                 let offset = Self::get_offset(&params);
                 tools::find_entry_points(&self.store, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
@@ -607,7 +635,7 @@ impl ServerHandler for BeretHandler {
                 let pattern = Self::require_arg(&params, "search_pattern", "pattern")?;
                 let language = Self::require_arg(&params, "search_pattern", "language")?;
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 200);
+                let limit = Self::get_limit(&params, 50);
                 let offset = Self::get_offset(&params);
                 let root = self.root.read().unwrap().clone();
                 tools::search_pattern(&root, pattern, language, &exclude, offset + limit)
@@ -630,7 +658,7 @@ impl ServerHandler for BeretHandler {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
                 let exclude = Self::get_exclude(&params);
-                let limit = Self::get_limit(&params, 500);
+                let limit = Self::get_limit(&params, 200);
                 tools::generate_diagram(&self.store, path, depth, code_only, &exclude, limit)
                     .map_or_else(|e| Err(Self::err(e)), Self::ok_text)
             }
