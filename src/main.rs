@@ -138,8 +138,12 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
         ),
         tool(
             "refresh_index", "Refresh Index",
-            "Re-scan the codebase and rebuild the knowledge graph from scratch.",
-            &[], &[],
+            "Scan a directory and rebuild the knowledge graph. If a path is provided, \
+             indexes that directory. If omitted, re-indexes the last indexed directory \
+             (or the current working directory if nothing has been indexed yet). \
+             Call this before using any other tool to populate the graph.",
+            &[("path", "string", "Directory path to index (defaults to last indexed path or cwd)")],
+            &[],
         ),
         tool(
             "find_symbol", "Find Symbol",
@@ -270,7 +274,13 @@ impl BeretHandler {
         CallToolError::from_message(msg)
     }
 
-    fn do_refresh(&self) -> std::result::Result<String, String> {
+    fn do_refresh(&self, path: Option<&str>) -> std::result::Result<String, String> {
+        if let Some(p) = path {
+            let resolved = std::path::Path::new(p)
+                .canonicalize()
+                .map_err(|e| format!("invalid path '{}': {}", p, e))?;
+            *self.root.write().unwrap() = resolved;
+        }
         let root = self.root.read().unwrap().clone();
         self.store.clear().map_err(|e| e.to_string())?;
         let count = ingest(&root, &self.store).map_err(|e| e.to_string())?;
@@ -339,10 +349,13 @@ impl ServerHandler for BeretHandler {
                 }
             }
 
-            "refresh_index" => match self.do_refresh() {
-                Ok(msg) => Self::ok_text(msg),
-                Err(e) => Err(Self::err(format!("Refresh error: {e}"))),
-            },
+            "refresh_index" => {
+                let path = Self::get_arg(&params, "path");
+                match self.do_refresh(path) {
+                    Ok(msg) => Self::ok_text(msg),
+                    Err(e) => Err(Self::err(format!("Refresh error: {e}"))),
+                }
+            }
 
             "find_symbol" => {
                 let name = Self::require_arg(&params, "find_symbol", "name")?;
@@ -434,10 +447,12 @@ fn make_server_details() -> InitializeResult {
         },
         protocol_version: ProtocolVersion::V2025_11_25.into(),
         instructions: Some(
-            "Beret indexes your codebase into an RDF knowledge graph. Use the provided tools \
-             to explore architecture, find symbols, trace call graphs, detect dead code, \
-             search for structural patterns, and query with SPARQL. Start with file_stats \
-             for an overview, then use find_entry_points to understand where the app starts."
+            "Beret builds an RDF knowledge graph of a codebase. Call refresh_index with a \
+             directory path to index it first, then use the other tools to explore. \
+             Start with file_stats for an overview, find_entry_points to locate where \
+             the app starts, find_symbol to locate definitions, find_callers/find_callees \
+             to trace the call graph, find_dead_code for unused functions, and \
+             search_pattern for structural AST matching. Use query_codebase for raw SPARQL."
                 .to_string(),
         ),
         meta: None,
@@ -447,9 +462,7 @@ fn make_server_details() -> InitializeResult {
 async fn run_stdio(root: PathBuf) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(CodebaseStore::new()?);
 
-    eprintln!("Beret: indexing {}...", root.display());
-    let count = ingest(&root, &store).map_err(|e| e.to_string())?;
-    eprintln!("Beret: indexed {} triples", count);
+    eprintln!("Beret: ready (use refresh_index to scan a directory)");
 
     let handler = BeretHandler {
         store,

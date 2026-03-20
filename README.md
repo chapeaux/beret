@@ -15,20 +15,23 @@ The release profile enables LTO and single codegen unit for maximum binary perfo
 
 ## Usage
 
-| Mode | Command | Transport | Indexing | `index_repo` tool |
-|------|---------|-----------|----------|--------------------|
-| Local | `beret /path/to/project` | stdio | Indexes given path on startup | No |
-| Local (cwd) | `beret` | stdio | Indexes current directory on startup | No |
-| Remote | `beret --serve 8080` | HTTP/SSE | On demand via `index_repo` | Yes |
-| Remote (bind all) | `beret --serve 0.0.0.0:9090` | HTTP/SSE | On demand via `index_repo` | Yes |
+The server starts with an empty knowledge graph and indexes on demand. Call `refresh_index` with a directory path to populate the graph, then use the other tools to explore. This lets you launch one server and re-target it at different projects or subdirectories as you work.
+
+| Mode | Command | Transport | `index_repo` tool |
+|------|---------|-----------|-------------------|
+| Local | `beret` | stdio | No |
+| Remote | `beret --serve 8080` | HTTP/SSE | Yes |
+| Remote (bind all) | `beret --serve 0.0.0.0:9090` | HTTP/SSE | Yes |
+
+An optional `[PATH]` argument (e.g., `beret /path/to/project`) sets the default directory for `refresh_index` when called without a path. If omitted, defaults to the current working directory.
 
 ## MCP client configuration
 
 | Setup | Install required | Config |
 |-------|-----------------|--------|
-| Stdio | `cargo install chapeaux-beret` | `{"command": "beret", "args": ["/path/to/project"]}` |
-| Stdio via npx | None | `{"command": "npx", "args": ["-y", "@chapeaux/beret", "/path/to/project"]}` |
-| Stdio via JSR | None | `{"command": "npx", "args": ["-y", "jsr:@chapeaux/beret", "/path/to/project"]}` |
+| Stdio | `cargo install chapeaux-beret` | `{"command": "beret"}` |
+| Stdio via npx | None | `{"command": "npx", "args": ["-y", "@chapeaux/beret"]}` |
+| Stdio via JSR | None | `{"command": "npx", "args": ["-y", "jsr:@chapeaux/beret"]}` |
 | Remote HTTP | None (server runs elsewhere) | `{"url": "http://your-server:8080/sse"}` |
 
 All entries are placed in
@@ -41,7 +44,7 @@ All entries are placed in
 ```
 in your client config (e.g., `mcp.json`, `claude_desktop_config.json`).
 
-For remote HTTP, ask the agent to index a repository after connecting: "index https://github.com/user/repo".
+After connecting, ask the agent to index a directory (e.g., "index the current project") or for remote HTTP, a repository (e.g., "index https://github.com/user/repo").
 
 ## Tools
 
@@ -79,7 +82,7 @@ For remote HTTP, ask the agent to index a repository after connecting: "index ht
 
 | Tool | Parameters | What it does |
 |------|-----------|-------------|
-| `refresh_index` | — | Clear and re-ingest all files from the current root directory. |
+| `refresh_index` | `path?` | Index a directory and build the knowledge graph. If `path` is given, indexes that directory. If omitted, re-indexes the last path (or cwd). Call this first before using other tools. |
 | `index_repo` *(HTTP only)* | `url` | Clone a git repo (or pull if already cloned) and index it. |
 
 ### `search_pattern` examples

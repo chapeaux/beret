@@ -3,6 +3,8 @@
 ## Overview
 Beret is a high-performance Rust MCP server in the `chapeaux` project family. It combines an RDF knowledge graph (oxigraph), structural code parsing (ast-grep), async runtime (tokio), and Model Context Protocol (rust-mcp-sdk) to expose codebase intelligence via SPARQL queries and purpose-built tools. It supports both stdio and HTTP/SSE transports.
 
+The server starts with an empty knowledge graph and indexes on demand via `refresh_index`. This allows it to be launched once at a top-level directory and re-targeted contextually as the user works across different projects or subdirectories.
+
 ## Project Structure
 ```
 beret/
@@ -39,11 +41,13 @@ beret/
 - **Crate name:** `chapeaux-beret`, **binary name:** `beret`
 - Custom CLI parser (no clap dependency) with `--serve`, `--help`, `--version`
 - Two modes:
-  - **Stdio:** `beret [PATH]` — indexes local dir, serves over stdio
-  - **HTTP:** `beret --serve [HOST:]PORT` — starts HTTP/SSE server via `HyperServer`/`HyperRuntime`
+  - **Stdio:** `beret [PATH]` — starts with empty graph, `PATH` sets default root for `refresh_index` (defaults to cwd)
+  - **HTTP:** `beret --serve [HOST:]PORT` — starts HTTP/SSE server, indexes on demand via `refresh_index` or `index_repo`
+- No startup indexing — graph is empty until `refresh_index` is called
 - Tool definitions built via `all_tools(http_mode)` helper
 - `BeretHandler` helper methods: `get_arg`, `require_arg`, `ok_json`, `ok_text`, `err`
-- `BeretHandler.root` is `RwLock<PathBuf>` — mutable for `index_repo`
+- `BeretHandler.root` is `RwLock<PathBuf>` — updated by `refresh_index(path)` and `index_repo`
+- `do_refresh(path)` — if `path` is `Some`, canonicalizes and updates root before indexing
 - IMPORTANT: `rust_mcp_sdk::schema::*` exports a `Result` struct that shadows `std::result::Result` — always use explicit imports
 - HTTP server: `hyper_server::create_server()` → `HyperRuntime::create()` → `.await_server()`
 
@@ -77,8 +81,8 @@ Pre-built SPARQL queries and live search functions called by the handler:
 ### Always available
 | Tool | Purpose |
 |------|---------|
+| `refresh_index` | Index a directory (optional `path` param, defaults to last root or cwd). Call this first. |
 | `query_codebase` | Raw SPARQL queries against the knowledge graph |
-| `refresh_index` | Clear and re-ingest the codebase |
 | `find_symbol` | Find definitions by name (partial match) |
 | `find_callers` | Reverse call graph: who calls function X? |
 | `find_callees` | Forward call graph: what does function X call? |
