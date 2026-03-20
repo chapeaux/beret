@@ -155,6 +155,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              Returns all definitions whose name contains the search term.",
             &[
                 ("name", "string", "Symbol name to search for (partial match)"),
+                ("exclude", "string", "Comma-separated directory names to exclude from results"),
                 ("limit", "integer", "Maximum number of results per page (default: 100)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
@@ -162,25 +163,27 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
         ),
         tool(
             "find_callers", "Find Callers",
-            "Find all functions that call a given function. \
-             Answers: 'Who calls this function?' and 'What depends on this?'",
+            "Find all functions that call a given function. If no name is given, returns \
+             all call relationships. Answers: 'Who calls this function?'",
             &[
-                ("name", "string", "Function name to find callers of"),
+                ("name", "string", "Function name to find callers of (omit for all call edges)"),
+                ("exclude", "string", "Comma-separated directory names to exclude from results"),
                 ("limit", "integer", "Maximum number of results per page (default: 100)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
-            &["name"],
+            &[],
         ),
         tool(
             "find_callees", "Find Callees",
-            "Find all functions called by a given function. \
-             Answers: 'What does this function depend on?' and 'What does it call?'",
+            "Find all functions called by a given function. If no name is given, returns \
+             all call relationships. Answers: 'What does this function call?'",
             &[
-                ("name", "string", "Function name to find callees of"),
+                ("name", "string", "Function name to find callees of (omit for all call edges)"),
+                ("exclude", "string", "Comma-separated directory names to exclude from results"),
                 ("limit", "integer", "Maximum number of results per page (default: 100)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
-            &["name"],
+            &[],
         ),
         tool(
             "list_structures", "List Structures",
@@ -190,6 +193,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             &[
                 ("path", "string", "Filter results to entries containing this path substring"),
                 ("kind", "string", "Filter to a specific kind: Function, Class, Config, Document, Binary, Stylesheet, Section, Style, Element"),
+                ("exclude", "string", "Comma-separated directory names to exclude from results"),
                 ("limit", "integer", "Maximum number of results per page (default: 200)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
@@ -200,13 +204,17 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             "Get a summary of the indexed codebase: counts of functions, classes, configs, \
              documents, binaries, styles, etc. Useful for understanding the tech stack and \
              project structure at a glance.",
-            &[], &[],
+            &[
+                ("exclude", "string", "Comma-separated directory names to exclude from counts"),
+            ],
+            &[],
         ),
         tool(
             "find_dead_code", "Find Dead Code",
             "Find functions that are defined but never called anywhere in the codebase. \
              Helps identify unused code, deprecated functions, and refactoring candidates.",
             &[
+                ("exclude", "string", "Comma-separated directory names to exclude from results"),
                 ("limit", "integer", "Maximum number of results per page (default: 100)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
@@ -217,6 +225,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             "List all external package dependencies declared in config files \
              (package.json dependencies, devDependencies, peerDependencies).",
             &[
+                ("exclude", "string", "Comma-separated directory names to exclude from results"),
                 ("limit", "integer", "Maximum number of results per page (default: 200)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
@@ -227,6 +236,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             "Find likely application entry points: main functions, index files, app modules, \
              server files, and CLI handlers. Answers: 'Where does this application start?'",
             &[
+                ("exclude", "string", "Comma-separated directory names to exclude from results"),
                 ("limit", "integer", "Maximum number of results per page (default: 100)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
@@ -242,6 +252,7 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             &[
                 ("pattern", "string", "ast-grep pattern to search for (use $NAME for wildcards)"),
                 ("language", "string", "Language to search in: python, rust, javascript, typescript, tsx, go, java, c, cpp, csharp, ruby, php, kotlin, swift, scala, bash, lua"),
+                ("exclude", "string", "Comma-separated directory names to exclude from search"),
                 ("limit", "integer", "Maximum number of results per page (default: 200)"),
                 ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
@@ -249,14 +260,15 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
         ),
         tool(
             "generate_diagram", "Generate Diagram",
-            "Generate an interconnected LikeC4 architecture diagram showing functions, \
-             classes, and their call relationships. By default shows code structures at \
-             full depth with call graph connections. Set code_only to false to include \
-             configs, docs, and assets. Output can be pasted into playground.likec4.dev \
-             or saved as a .c4 file.",
+            "Generate an interconnected LikeC4 architecture diagram showing code structures \
+             and their call relationships. Depth auto-adjusts based on codebase size: \
+             small (<100 symbols) shows functions/classes, medium shows files, large shows \
+             directories. Set depth explicitly to override. Set code_only to false to \
+             include configs, docs, and assets. Output can be pasted into \
+             playground.likec4.dev or saved as a .c4 file.",
             &[
                 ("path", "string", "Focus on a subdirectory or module"),
-                ("depth", "integer", "1=directories, 2=+files, 3=+functions/classes (default: 3)"),
+                ("depth", "integer", "0=auto (default), 1=directories, 2=+files, 3=+functions/classes"),
                 ("code_only", "boolean", "Exclude non-code types and non-source directories like docs, tests, stories, images, dist (default: true)"),
                 ("exclude", "string", "Comma-separated directory names to exclude (e.g., 'stories,examples,demo')"),
                 ("limit", "integer", "Maximum elements to include (default: 500)"),
@@ -378,6 +390,12 @@ impl BeretHandler {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(default)
+    }
+
+    fn get_exclude(params: &CallToolRequestParams) -> Vec<String> {
+        Self::get_arg(params, "exclude")
+            .map(|s| s.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect())
+            .unwrap_or_default()
     }
 
     fn get_offset(params: &CallToolRequestParams) -> usize {
@@ -520,70 +538,79 @@ impl ServerHandler for BeretHandler {
 
             "find_symbol" => {
                 let name = Self::require_arg(&params, "find_symbol", "name")?;
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 100);
                 let offset = Self::get_offset(&params);
-                tools::find_symbol(&self.store, name)
+                tools::find_symbol(&self.store, name, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "find_callers" => {
-                let name = Self::require_arg(&params, "find_callers", "name")?;
+                let name = Self::get_arg(&params, "name");
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 100);
                 let offset = Self::get_offset(&params);
-                tools::find_callers(&self.store, name)
+                tools::find_callers(&self.store, name, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "find_callees" => {
-                let name = Self::require_arg(&params, "find_callees", "name")?;
+                let name = Self::get_arg(&params, "name");
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 100);
                 let offset = Self::get_offset(&params);
-                tools::find_callees(&self.store, name)
+                tools::find_callees(&self.store, name, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "list_structures" => {
                 let path = Self::get_arg(&params, "path");
                 let kind = Self::get_arg(&params, "kind");
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 200);
                 let offset = Self::get_offset(&params);
-                tools::list_structures(&self.store, path, kind)
+                tools::list_structures(&self.store, path, kind, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "file_stats" => {
-                tools::file_stats(&self.store)
+                let exclude = Self::get_exclude(&params);
+                tools::file_stats(&self.store, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
             }
 
             "find_dead_code" => {
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 100);
                 let offset = Self::get_offset(&params);
-                tools::find_dead_code(&self.store)
+                tools::find_dead_code(&self.store, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "find_dependencies" => {
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 200);
                 let offset = Self::get_offset(&params);
-                tools::find_dependencies(&self.store)
+                tools::find_dependencies(&self.store, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "find_entry_points" => {
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 100);
                 let offset = Self::get_offset(&params);
-                tools::find_entry_points(&self.store)
+                tools::find_entry_points(&self.store, &exclude)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "search_pattern" => {
                 let pattern = Self::require_arg(&params, "search_pattern", "pattern")?;
                 let language = Self::require_arg(&params, "search_pattern", "language")?;
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 200);
                 let offset = Self::get_offset(&params);
                 let root = self.root.read().unwrap().clone();
-                tools::search_pattern(&root, pattern, language, offset + limit)
+                tools::search_pattern(&root, pattern, language, &exclude, offset + limit)
                     .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
@@ -595,16 +622,14 @@ impl ServerHandler for BeretHandler {
                     .and_then(|args| args.get("depth"))
                     .and_then(|v| v.as_u64())
                     .map(|n| n as usize)
-                    .unwrap_or(3);
+                    .unwrap_or(0);
                 let code_only = params
                     .arguments
                     .as_ref()
                     .and_then(|args| args.get("code_only"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let exclude: Vec<String> = Self::get_arg(&params, "exclude")
-                    .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
-                    .unwrap_or_default();
+                let exclude = Self::get_exclude(&params);
                 let limit = Self::get_limit(&params, 500);
                 tools::generate_diagram(&self.store, path, depth, code_only, &exclude, limit)
                     .map_or_else(|e| Err(Self::err(e)), Self::ok_text)

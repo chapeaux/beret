@@ -10,33 +10,54 @@ use crate::store::CodebaseStore;
 
 const P: &str = "http://repo.example.org/";
 
+/// Build SPARQL FILTER clauses to exclude directories from a given variable.
+fn exclude_filters(var: &str, exclude: &[String]) -> String {
+    exclude
+        .iter()
+        .map(|dir| format!(r#"FILTER(!CONTAINS(STR(?{var}), "/{dir}/"))"#))
+        .collect::<Vec<_>>()
+        .join("\n            ")
+}
+
 // --- Pre-built SPARQL query tools ---
 
-pub fn find_symbol(store: &CodebaseStore, name: &str) -> Result<Value, String> {
+pub fn find_symbol(store: &CodebaseStore, name: &str, exclude: &[String]) -> Result<Value, String> {
+    let excl = exclude_filters("subject", exclude);
     let sparql = format!(
         r#"SELECT ?subject ?type WHERE {{
             ?subject <{P}a> ?type .
             FILTER(CONTAINS(STR(?subject), "{name}"))
+            {excl}
         }}"#
     );
     store.query_to_json(&sparql).map_err(|e| e.to_string())
 }
 
-pub fn find_callers(store: &CodebaseStore, function_name: &str) -> Result<Value, String> {
+pub fn find_callers(store: &CodebaseStore, function_name: Option<&str>, exclude: &[String]) -> Result<Value, String> {
+    let excl = exclude_filters("caller", exclude);
+    let name_filter = function_name
+        .map(|n| format!(r#"FILTER(CONTAINS(STR(?callee), "{n}"))"#))
+        .unwrap_or_default();
     let sparql = format!(
-        r#"SELECT ?caller WHERE {{
+        r#"SELECT ?caller ?callee WHERE {{
             ?caller <{P}calls> ?callee .
-            FILTER(CONTAINS(STR(?callee), "{function_name}"))
+            {name_filter}
+            {excl}
         }}"#
     );
     store.query_to_json(&sparql).map_err(|e| e.to_string())
 }
 
-pub fn find_callees(store: &CodebaseStore, function_name: &str) -> Result<Value, String> {
+pub fn find_callees(store: &CodebaseStore, function_name: Option<&str>, exclude: &[String]) -> Result<Value, String> {
+    let excl = exclude_filters("caller", exclude);
+    let name_filter = function_name
+        .map(|n| format!(r#"FILTER(CONTAINS(STR(?caller), "{n}"))"#))
+        .unwrap_or_default();
     let sparql = format!(
-        r#"SELECT ?callee WHERE {{
+        r#"SELECT ?caller ?callee WHERE {{
             ?caller <{P}calls> ?callee .
-            FILTER(CONTAINS(STR(?caller), "{function_name}"))
+            {name_filter}
+            {excl}
         }}"#
     );
     store.query_to_json(&sparql).map_err(|e| e.to_string())
@@ -46,6 +67,7 @@ pub fn list_structures(
     store: &CodebaseStore,
     path_filter: Option<&str>,
     kind_filter: Option<&str>,
+    exclude: &[String],
 ) -> Result<Value, String> {
     let mut filters = Vec::new();
     if let Some(p) = path_filter {
@@ -53,6 +75,10 @@ pub fn list_structures(
     }
     if let Some(k) = kind_filter {
         filters.push(format!(r#"FILTER(STR(?type) = "{P}{k}")"#));
+    }
+    let excl = exclude_filters("subject", exclude);
+    if !excl.is_empty() {
+        filters.push(excl);
     }
     let filter_clause = filters.join("\n            ");
     let sparql = format!(
@@ -64,19 +90,24 @@ pub fn list_structures(
     store.query_to_json(&sparql).map_err(|e| e.to_string())
 }
 
-pub fn file_stats(store: &CodebaseStore) -> Result<Value, String> {
+pub fn file_stats(store: &CodebaseStore, exclude: &[String]) -> Result<Value, String> {
+    let excl = exclude_filters("subject", exclude);
     let sparql = format!(
         r#"SELECT ?type (COUNT(?subject) AS ?count) WHERE {{
             ?subject <{P}a> ?type .
+            {excl}
         }} GROUP BY ?type ORDER BY DESC(?count)"#
     );
     store.query_to_json(&sparql).map_err(|e| e.to_string())
 }
 
-pub fn find_dead_code(store: &CodebaseStore) -> Result<Value, String> {
-    // Get all functions and all call targets, diff in Rust
+pub fn find_dead_code(store: &CodebaseStore, exclude: &[String]) -> Result<Value, String> {
+    let excl = exclude_filters("func", exclude);
     let funcs_sparql = format!(
-        r#"SELECT ?func WHERE {{ ?func <{P}a> <{P}Function> }} ORDER BY ?func"#
+        r#"SELECT ?func WHERE {{
+            ?func <{P}a> <{P}Function> .
+            {excl}
+        }} ORDER BY ?func"#
     );
     let calls_sparql = format!(
         r#"SELECT DISTINCT ?callee WHERE {{ ?caller <{P}calls> ?callee }}"#
@@ -102,13 +133,11 @@ pub fn find_dead_code(store: &CodebaseStore) -> Result<Value, String> {
         .iter()
         .filter(|row| {
             if let Some(func_iri) = row.get("func").and_then(|v| v.as_str()) {
-                // Extract the short name after last /
                 let short_name = func_iri
                     .rsplit('/')
                     .next()
                     .unwrap_or("")
                     .trim_end_matches('>');
-                // Not called if no call target contains this name
                 !call_targets.contains(short_name)
             } else {
                 false
@@ -120,17 +149,19 @@ pub fn find_dead_code(store: &CodebaseStore) -> Result<Value, String> {
     Ok(Value::Array(dead))
 }
 
-pub fn find_dependencies(store: &CodebaseStore) -> Result<Value, String> {
+pub fn find_dependencies(store: &CodebaseStore, exclude: &[String]) -> Result<Value, String> {
+    let excl = exclude_filters("file", exclude);
     let sparql = format!(
         r#"SELECT ?file ?dependency WHERE {{
             ?file <{P}dependsOn> ?dependency .
+            {excl}
         }} ORDER BY ?file ?dependency"#
     );
     store.query_to_json(&sparql).map_err(|e| e.to_string())
 }
 
-pub fn find_entry_points(store: &CodebaseStore) -> Result<Value, String> {
-    // Look for common entry point patterns: main functions, index files, app files
+pub fn find_entry_points(store: &CodebaseStore, exclude: &[String]) -> Result<Value, String> {
+    let excl = exclude_filters("entry", exclude);
     let sparql = format!(
         r#"SELECT ?entry ?type WHERE {{
             ?entry <{P}a> ?type .
@@ -142,6 +173,7 @@ pub fn find_entry_points(store: &CodebaseStore) -> Result<Value, String> {
                 CONTAINS(STR(?entry), "/cli") ||
                 CONTAINS(STR(?entry), "/cmd")
             )
+            {excl}
         }} ORDER BY ?entry"#
     );
     store.query_to_json(&sparql).map_err(|e| e.to_string())
@@ -366,7 +398,7 @@ pub fn describe_dependencies(store: &CodebaseStore) -> Result<Value, String> {
 
 // --- Live ast-grep pattern search ---
 
-pub fn search_pattern(root: &Path, pattern: &str, language: &str, limit: usize) -> Result<Value, String> {
+pub fn search_pattern(root: &Path, pattern: &str, language: &str, exclude: &[String], limit: usize) -> Result<Value, String> {
     let lang: SupportLang = language
         .parse()
         .map_err(|_| format!("unsupported language: {language}"))?;
@@ -407,6 +439,13 @@ pub fn search_pattern(root: &Path, pattern: &str, language: &str, limit: usize) 
         if !extensions.contains(&ext) {
             continue;
         }
+        // Skip excluded directories
+        if !exclude.is_empty() {
+            let path_str = path.to_string_lossy();
+            if exclude.iter().any(|dir| path_str.contains(&format!("/{dir}/"))) {
+                continue;
+            }
+        }
         let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(_) => continue,
@@ -434,14 +473,41 @@ pub fn search_pattern(root: &Path, pattern: &str, language: &str, limit: usize) 
 // --- LikeC4 diagram generation ---
 
 /// Convert a string to a valid LikeC4 identifier (alphanumeric + underscore).
+/// LikeC4 reserved words that cannot be used as identifiers.
+const LIKEC4_RESERVED: &[&str] = &[
+    // DSL structure keywords
+    "specification", "element", "relationship", "tag", "color", "model",
+    "views", "view", "style", "extend", "include", "exclude",
+    "it", "this", "navigate", "dynamic", "parallel",
+    // Element/relationship properties
+    "title", "description", "technology", "notation", "metadata", "link",
+    "summary", "links",
+    // Styling keywords
+    "shape", "opacity", "border", "icon", "icons",
+    "rectangle", "queue", "person", "cylinder", "storage", "browser", "mobile",
+    "autoLayout", "animation",
+    // Our element kind names (can't reuse as identifiers)
+    "module", "file", "func", "cls", "external",
+    // Common codebase names that are LikeC4 keywords or cause conflicts
+    "interactive", "async", "default", "import", "export", "where", "of",
+    "component", "container", "system", "context", "deployment",
+    "content", "media", "table", "utility",
+];
+
 fn to_id(s: &str) -> String {
     let id: String = s
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
         .collect();
-    // Ensure it starts with a letter (LikeC4 requirement)
-    if id.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("_{id}")
+    // Ensure it starts with a letter
+    let id = if id.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("n{id}")
+    } else {
+        id
+    };
+    // Escape reserved words with a readable suffix
+    if LIKEC4_RESERVED.contains(&id.as_str()) {
+        format!("{id}El")
     } else {
         id
     }
@@ -480,6 +546,23 @@ pub fn generate_diagram(
     exclude: &[String],
     limit: usize,
 ) -> std::result::Result<String, String> {
+    // Auto-depth: if depth is 0, pick based on result count
+    let depth = if depth == 0 {
+        // Quick count of code structures
+        let count_sparql = format!(
+            r#"SELECT (COUNT(?s) AS ?count) WHERE {{ ?s <{P}a> ?type . FILTER(?type IN (<{P}Function>, <{P}Class>)) }}"#
+        );
+        let count = store.query_to_json(&count_sparql)
+            .ok()
+            .and_then(|v| v.as_array()?.first()?.get("count")?.as_str()?.trim_matches('"').parse::<usize>().ok())
+            .unwrap_or(0);
+        if count <= 100 { 3 }       // Small: show everything
+        else if count <= 500 { 2 }  // Medium: files only
+        else { 1 }                  // Large: directories only
+    } else {
+        depth
+    };
+
     // 1. Query all structures
     let mut filters = Vec::new();
     if let Some(p) = scope {
@@ -626,23 +709,81 @@ pub fn generate_diagram(
     // 5. Build LikeC4 DSL
     let mut out = String::new();
 
-    // Specification
+    // Specification — Beret theme
     writeln!(out, "specification {{").unwrap();
+
+    // Custom Beret palette
+    writeln!(out, "  color beret-navy #00005F").unwrap();
+    writeln!(out, "  color beret-orange #F5921B").unwrap();
+    writeln!(out, "  color beret-gold #FFCC17").unwrap();
+    writeln!(out, "  color beret-teal #37A3A3").unwrap();
+    writeln!(out, "  color beret-blue #0066CC").unwrap();
+
+    // Module: large translucent navy container
     writeln!(out, "  element module {{").unwrap();
-    writeln!(out, "    style {{ shape rectangle }}").unwrap();
+    writeln!(out, "    style {{").unwrap();
+    writeln!(out, "      shape rectangle").unwrap();
+    writeln!(out, "      color beret-navy").unwrap();
+    writeln!(out, "      opacity 10%").unwrap();
+    writeln!(out, "      border solid").unwrap();
+    writeln!(out, "      size large").unwrap();
+    writeln!(out, "    }}").unwrap();
     writeln!(out, "  }}").unwrap();
+
     if depth >= 2 {
-        writeln!(out, "  element file").unwrap();
+        // File: blue component shape
+        writeln!(out, "  element file {{").unwrap();
+        writeln!(out, "    style {{").unwrap();
+        writeln!(out, "      shape component").unwrap();
+        writeln!(out, "      color beret-blue").unwrap();
+        writeln!(out, "      size medium").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "  }}").unwrap();
     }
+
     if depth >= 3 {
-        writeln!(out, "  element func").unwrap();
-        writeln!(out, "  element cls").unwrap();
+        // Function: small teal rectangle
+        writeln!(out, "  element func {{").unwrap();
+        writeln!(out, "    style {{").unwrap();
+        writeln!(out, "      shape rectangle").unwrap();
+        writeln!(out, "      color beret-teal").unwrap();
+        writeln!(out, "      size small").unwrap();
+        writeln!(out, "      textSize xsmall").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "  }}").unwrap();
+
+        // Class: navy storage shape
+        writeln!(out, "  element cls {{").unwrap();
+        writeln!(out, "    style {{").unwrap();
+        writeln!(out, "      shape storage").unwrap();
+        writeln!(out, "      color beret-navy").unwrap();
+        writeln!(out, "      size medium").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "  }}").unwrap();
     }
+
+    // External dependency: gold, dashed border
     writeln!(out, "  element external {{").unwrap();
-    writeln!(out, "    style {{ color muted }}").unwrap();
+    writeln!(out, "    style {{").unwrap();
+    writeln!(out, "      shape cylinder").unwrap();
+    writeln!(out, "      color beret-gold").unwrap();
+    writeln!(out, "      border dashed").unwrap();
+    writeln!(out, "      size small").unwrap();
+    writeln!(out, "    }}").unwrap();
     writeln!(out, "  }}").unwrap();
-    writeln!(out, "  relationship calls").unwrap();
-    writeln!(out, "  relationship dependsOn").unwrap();
+
+    // Relationship styles
+    writeln!(out, "  relationship calls {{").unwrap();
+    writeln!(out, "    color beret-orange").unwrap();
+    writeln!(out, "    line solid").unwrap();
+    writeln!(out, "    head normal").unwrap();
+    writeln!(out, "  }}").unwrap();
+    writeln!(out, "  relationship dependsOn {{").unwrap();
+    writeln!(out, "    color beret-gold").unwrap();
+    writeln!(out, "    line dashed").unwrap();
+    writeln!(out, "    head diamond").unwrap();
+    writeln!(out, "  }}").unwrap();
+
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -717,10 +858,13 @@ pub fn generate_diagram(
 
     writeln!(out).unwrap();
 
-    // Relationships — calls
+    // Relationships — collect per source element, emit inside parent via extend
     let call_rows = calls.as_array().map_or(&[] as &[Value], |v| v.as_slice());
     let mut rel_count = 0;
     let mut emitted_rels: BTreeSet<(String, String)> = BTreeSet::new();
+    // Group relationships by the source element's parent module
+    // key = parent module ID, value = vec of "child -> target 'label'" lines
+    let mut rels_by_parent: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for row in call_rows {
         if rel_count >= limit {
@@ -729,13 +873,10 @@ pub fn generate_diagram(
         let caller_raw = strip_iri(row.get("caller").and_then(|v| v.as_str()).unwrap_or(""));
         let callee_raw = strip_iri(row.get("callee").and_then(|v| v.as_str()).unwrap_or(""));
 
-        // Look up caller in id_map
         let caller_id = match id_map.get(caller_raw) {
             Some(id) => id.clone(),
             None => continue,
         };
-
-        // Look up callee by short name in callee_index
         let callee_ids = match callee_index.get(callee_raw) {
             Some(ids) => ids.clone(),
             None => continue,
@@ -743,11 +884,22 @@ pub fn generate_diagram(
 
         for callee_id in callee_ids {
             if caller_id == callee_id {
-                continue; // skip self-calls
+                continue;
             }
             let rel_key = (caller_id.clone(), callee_id.clone());
             if emitted_rels.insert(rel_key) {
-                writeln!(out, "  {} -[calls]-> {} 'calls'", caller_id, callee_id).unwrap();
+                // Find the parent module of the caller (first segment of dot ID)
+                let parent = caller_id.split('.').next().unwrap_or(&caller_id).to_string();
+                // Use relative ID within the parent for the caller
+                let caller_rel = if let Some(rest) = caller_id.strip_prefix(&format!("{parent}.")) {
+                    rest.to_string()
+                } else {
+                    caller_id.clone()
+                };
+                rels_by_parent
+                    .entry(parent)
+                    .or_default()
+                    .push(format!("{caller_rel} -[calls]-> {callee_id} 'calls'"));
                 rel_count += 1;
                 if rel_count >= limit {
                     break;
@@ -756,7 +908,7 @@ pub fn generate_diagram(
         }
     }
 
-    // Relationships — dependencies
+    // Dependencies
     for row in dep_rows {
         if rel_count >= limit {
             break;
@@ -772,9 +924,27 @@ pub fn generate_diagram(
 
         let rel_key = (file_id.clone(), dep_id.clone());
         if emitted_rels.insert(rel_key) {
-            writeln!(out, "  {} -[dependsOn]-> {} 'depends on'", file_id, dep_id).unwrap();
+            let parent = file_id.split('.').next().unwrap_or(&file_id).to_string();
+            let file_rel = if let Some(rest) = file_id.strip_prefix(&format!("{parent}.")) {
+                rest.to_string()
+            } else {
+                file_id.clone()
+            };
+            rels_by_parent
+                .entry(parent)
+                .or_default()
+                .push(format!("{file_rel} -[dependsOn]-> {dep_id} 'depends on'"));
             rel_count += 1;
         }
+    }
+
+    // Emit relationships using extend blocks inside each parent module
+    for (parent_id, rels) in &rels_by_parent {
+        writeln!(out, "  extend {} {{", parent_id).unwrap();
+        for rel in rels {
+            writeln!(out, "    {}", rel).unwrap();
+        }
+        writeln!(out, "  }}").unwrap();
     }
 
     writeln!(out, "}}").unwrap();
@@ -789,7 +959,7 @@ pub fn generate_diagram(
 
     // Scoped views per top-level directory
     for dir_id in &top_level_dirs {
-        writeln!(out, "  view of {} {{", dir_id).unwrap();
+        writeln!(out, "  view view_{} of {} {{", dir_id, dir_id).unwrap();
         writeln!(out, "    include *").unwrap();
         writeln!(out, "  }}").unwrap();
     }
