@@ -1,7 +1,7 @@
 # Beret — Architecture
 
 ## Overview
-Beret is a high-performance Rust MCP server in the `chapeaux` project family. It combines an RDF knowledge graph (oxigraph), structural code parsing (ast-grep), async runtime (tokio), and Model Context Protocol (rust-mcp-sdk) to expose codebase intelligence via SPARQL queries. It supports both stdio and HTTP/SSE transports.
+Beret is a high-performance Rust MCP server in the `chapeaux` project family. It combines an RDF knowledge graph (oxigraph), structural code parsing (ast-grep), async runtime (tokio), and Model Context Protocol (rust-mcp-sdk) to expose codebase intelligence via SPARQL queries and purpose-built tools. It supports both stdio and HTTP/SSE transports.
 
 ## Project Structure
 ```
@@ -17,6 +17,7 @@ beret/
 └── src/
     ├── main.rs       # CLI + MCP server (stdio and HTTP modes)
     ├── store.rs      # CodebaseStore — oxigraph wrapper
+    ├── tools.rs      # Pre-built query tools + live ast-grep pattern search
     └── ingestor.rs   # Parallel file walker + extraction → RDF triples
 ```
 
@@ -40,13 +41,23 @@ beret/
 - Two modes:
   - **Stdio:** `beret [PATH]` — indexes local dir, serves over stdio
   - **HTTP:** `beret --serve [HOST:]PORT` — starts HTTP/SSE server via `HyperServer`/`HyperRuntime`
-- Three tools:
-  - **`query_codebase`**: SPARQL queries → JSON results
-  - **`refresh_index`**: clears + re-ingests
-  - **`index_repo`** (HTTP mode only): `git clone --depth 1` → index (reuses via `git pull`)
+- Tool definitions built via `all_tools(http_mode)` helper
+- `BeretHandler` helper methods: `get_arg`, `require_arg`, `ok_json`, `ok_text`, `err`
 - `BeretHandler.root` is `RwLock<PathBuf>` — mutable for `index_repo`
 - IMPORTANT: `rust_mcp_sdk::schema::*` exports a `Result` struct that shadows `std::result::Result` — always use explicit imports
 - HTTP server: `hyper_server::create_server()` → `HyperRuntime::create()` → `.await_server()`
+
+### tools.rs — Query Tools + Live Search
+Pre-built SPARQL queries and live search functions called by the handler:
+- `find_symbol(store, name)` — SPARQL FILTER CONTAINS on subject IRIs
+- `find_callers(store, name)` — SPARQL on `calls` predicate, filter callee
+- `find_callees(store, name)` — SPARQL on `calls` predicate, filter caller
+- `list_structures(store, path, kind)` — SPARQL with optional FILTER clauses
+- `file_stats(store)` — SPARQL COUNT/GROUP BY on types
+- `find_dead_code(store)` — two-pass: get all functions + all call targets, diff in Rust
+- `find_dependencies(store)` — SPARQL on `dependsOn` predicate
+- `find_entry_points(store)` — SPARQL FILTER for main/index/app/server/cli patterns
+- `search_pattern(root, pattern, language)` — live ast-grep walk, returns file/line/text (max 200 results)
 
 ### store.rs — CodebaseStore
 - Wraps `oxigraph::store::Store` (in-memory RDF)
@@ -61,10 +72,33 @@ beret/
   3. **Binary metadata**: MIME type + file size for 30+ extensions
 - All user-facing text sanitized via `iri_safe()` (allowlist approach for IRI characters)
 
+## MCP Tools
+
+### Always available
+| Tool | Purpose |
+|------|---------|
+| `query_codebase` | Raw SPARQL queries against the knowledge graph |
+| `refresh_index` | Clear and re-ingest the codebase |
+| `find_symbol` | Find definitions by name (partial match) |
+| `find_callers` | Reverse call graph: who calls function X? |
+| `find_callees` | Forward call graph: what does function X call? |
+| `list_structures` | List all structures, optionally filtered by path or kind |
+| `file_stats` | Count of each type (Function, Class, Config, etc.) |
+| `find_dead_code` | Functions defined but never called |
+| `find_dependencies` | Package dependencies from config files |
+| `find_entry_points` | Find main/index/app/server entry points |
+| `search_pattern` | Live ast-grep structural pattern search |
+
+### HTTP mode only
+| Tool | Purpose |
+|------|---------|
+| `index_repo` | Clone a git repo and index it |
+
 ## Distribution
 - **crates.io:** `cargo install chapeaux-beret` (published as `chapeaux-beret`)
 - **npm:** `npx @chapeaux/beret` (downloads platform binary from GitHub releases)
 - **JSR:** `npx jsr:@chapeaux/beret` (same mechanism)
+- **CI:** `.github/workflows/release.yml` builds for 5 targets, publishes to GitHub Releases + crates.io + npm
 
 ## Build
 - Release profile: `lto = true`, `codegen-units = 1`

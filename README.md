@@ -1,6 +1,6 @@
 # Beret
 
-An MCP server that builds an in-memory RDF knowledge graph of your codebase and exposes it via SPARQL queries. It parses 17 programming languages using structural AST analysis, extracts metadata from config files and documents, records binary file information, and lets you query everything through the Model Context Protocol.
+An MCP server that builds an in-memory RDF knowledge graph of your codebase and exposes it through purpose-built tools and SPARQL queries. It parses 17 programming languages using structural AST analysis, extracts metadata from config files and documents, records binary file information, and lets you explore everything through the Model Context Protocol.
 
 ## Installation
 
@@ -31,49 +31,85 @@ The release profile enables LTO and single codegen unit for maximum binary perfo
 | Stdio via JSR | None | `{"command": "npx", "args": ["-y", "jsr:@chapeaux/beret", "/path/to/project"]}` |
 | Remote HTTP | None (server runs elsewhere) | `{"url": "http://your-server:8080/sse"}` |
 
-All entries are placed in 
+All entries are placed in
 ```
 {
-  "mcpServers": { 
+  "mcpServers": {
     "beret": ...
   }
 }
-``` 
+```
 in your client config (e.g., `mcp.json`, `claude_desktop_config.json`).
 
 For remote HTTP, ask the agent to index a repository after connecting: "index https://github.com/user/repo".
 
 ## Tools
 
-### `query_codebase`
+### Exploration tools
 
-Execute a SPARQL query against the knowledge graph.
+| Tool | Parameters | What it does |
+|------|-----------|-------------|
+| `file_stats` | — | Count of functions, classes, configs, documents, binaries, etc. Start here for a project overview. |
+| `find_entry_points` | — | Find main functions, index files, app/server/cli modules. Answers: "Where does this app start?" |
+| `list_structures` | `path?`, `kind?` | List all indexed structures. Filter by file path substring and/or kind (`Function`, `Class`, `Config`, `Document`, `Binary`, `Stylesheet`, `Section`, `Style`, `Element`). |
+| `find_symbol` | `name` | Find where a function, class, struct, or module is defined. Partial name match. |
 
-**Parameters:**
-- `sparql` (string, required) — A SPARQL SELECT or ASK query.
+### Call graph tools
+
+| Tool | Parameters | What it does |
+|------|-----------|-------------|
+| `find_callers` | `name` | Who calls this function? Trace upstream dependencies and find fragile coupling. |
+| `find_callees` | `name` | What does this function call? Trace downstream dependencies. |
+| `find_dead_code` | — | Functions defined but never called anywhere. Find unused code and refactoring candidates. |
+
+### Dependency & config tools
+
+| Tool | Parameters | What it does |
+|------|-----------|-------------|
+| `find_dependencies` | — | List all external package dependencies from package.json (dependencies, devDependencies, peerDependencies). |
+
+### Code search tools
+
+| Tool | Parameters | What it does |
+|------|-----------|-------------|
+| `search_pattern` | `pattern`, `language` | Structural AST search using ast-grep syntax. Unlike text search, matches code structure. Use `$NAME` for wildcards, `$$$ARGS` for variadic. Returns file, line, and matched text (max 200 results). |
+| `query_codebase` | `sparql` | Raw SPARQL SELECT/ASK against the knowledge graph for advanced queries. |
+
+### Index management tools
+
+| Tool | Parameters | What it does |
+|------|-----------|-------------|
+| `refresh_index` | — | Clear and re-ingest all files from the current root directory. |
+| `index_repo` *(HTTP only)* | `url` | Clone a git repo (or pull if already cloned) and index it. |
+
+### `search_pattern` examples
+
+Find all Rust functions:
+```
+pattern: "fn $NAME($$$ARGS) { $$$BODY }"
+language: "rust"
+```
+
+Find all console.log calls in JavaScript:
+```
+pattern: "console.log($MSG)"
+language: "javascript"
+```
+
+Find Python classes inheriting from a base:
+```
+pattern: "class $NAME($BASE): $$$BODY"
+language: "python"
+```
+
+### `query_codebase` SPARQL examples
 
 All IRIs use the `repo:` prefix, which expands to `http://repo.example.org/`.
-
-**Example queries:**
 
 List all functions:
 ```sparql
 SELECT ?func WHERE {
   ?func <http://repo.example.org/a> <http://repo.example.org/Function>
-}
-```
-
-List all classes:
-```sparql
-SELECT ?cls WHERE {
-  ?cls <http://repo.example.org/a> <http://repo.example.org/Class>
-}
-```
-
-Find what a specific function calls:
-```sparql
-SELECT ?callee WHERE {
-  <http://repo.example.org/src/main.rs/main> <http://repo.example.org/calls> ?callee
 }
 ```
 
@@ -84,14 +120,14 @@ SELECT ?caller WHERE {
 }
 ```
 
-Find all dependencies declared in package.json:
+Find all dependencies:
 ```sparql
 SELECT ?file ?dep WHERE {
   ?file <http://repo.example.org/dependsOn> ?dep
 }
 ```
 
-List all binary files with their MIME types:
+List binary files with MIME types:
 ```sparql
 SELECT ?file ?mime WHERE {
   ?file <http://repo.example.org/a> <http://repo.example.org/Binary> .
@@ -99,38 +135,10 @@ SELECT ?file ?mime WHERE {
 }
 ```
 
-List all config file keys:
-```sparql
-SELECT ?file ?key WHERE {
-  ?file <http://repo.example.org/a> <http://repo.example.org/Config> .
-  ?file <http://repo.example.org/declares> ?key
-}
-```
-
-Find all CSS selectors:
-```sparql
-SELECT ?selector WHERE {
-  ?selector <http://repo.example.org/a> <http://repo.example.org/Style>
-}
-```
-
 Check if any call relationships exist:
 ```sparql
 ASK { ?a <http://repo.example.org/calls> ?b }
 ```
-
-### `refresh_index`
-
-Clear the knowledge graph and re-ingest all files. In stdio mode, re-reads the local directory. In HTTP mode, re-reads the last cloned repository.
-
-**Parameters:** none.
-
-### `index_repo` (HTTP mode only)
-
-Clone a git repository and index it into the knowledge graph. Clears any existing index first. On subsequent calls with the same URL, pulls latest changes instead of re-cloning.
-
-**Parameters:**
-- `url` (string, required) — Git repository URL (HTTPS or SSH).
 
 ## Knowledge graph schema
 
