@@ -1,5 +1,6 @@
 mod ingestor;
 mod store;
+mod tools;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -110,66 +111,119 @@ fn make_tool_input_schema(
     )
 }
 
-fn query_codebase_tool() -> Tool {
+fn tool(name: &str, title: &str, desc: &str, props: &[(&str, &str, &str)], required: &[&str]) -> Tool {
     Tool {
-        name: "query_codebase".to_string(),
-        title: Some("Query Codebase".to_string()),
-        description: Some(
+        name: name.to_string(),
+        title: Some(title.to_string()),
+        description: Some(desc.to_string()),
+        input_schema: make_tool_input_schema(props, required),
+        annotations: None,
+        execution: None,
+        icons: vec![],
+        meta: None,
+        output_schema: None,
+    }
+}
+
+fn all_tools(http_mode: bool) -> Vec<Tool> {
+    let mut t = vec![
+        tool(
+            "query_codebase", "Query Codebase",
             "Execute a SPARQL SELECT or ASK query against the codebase knowledge graph. \
              The graph uses the repo: prefix (http://repo.example.org/). \
              Triples include: <file/func> a repo:Function, <file/class> a repo:Class, \
-             <caller> repo:calls <callee>."
-                .to_string(),
-        ),
-        input_schema: make_tool_input_schema(
-            &[("sparql", "string", "A SPARQL query string to execute against the codebase graph")],
+             <caller> repo:calls <callee>, <file> repo:dependsOn <pkg>, etc.",
+            &[("sparql", "string", "A SPARQL query string")],
             &["sparql"],
         ),
-        annotations: None,
-        execution: None,
-        icons: vec![],
-        meta: None,
-        output_schema: None,
-    }
-}
-
-fn refresh_index_tool() -> Tool {
-    Tool {
-        name: "refresh_index".to_string(),
-        title: Some("Refresh Index".to_string()),
-        description: Some(
-            "Re-scan the codebase and rebuild the knowledge graph. \
-             Clears existing triples and re-ingests all supported files."
-                .to_string(),
+        tool(
+            "refresh_index", "Refresh Index",
+            "Re-scan the codebase and rebuild the knowledge graph from scratch.",
+            &[], &[],
         ),
-        input_schema: make_tool_input_schema(&[], &[]),
-        annotations: None,
-        execution: None,
-        icons: vec![],
-        meta: None,
-        output_schema: None,
-    }
-}
+        tool(
+            "find_symbol", "Find Symbol",
+            "Find where a function, class, struct, or module is defined by name. \
+             Returns all definitions whose name contains the search term.",
+            &[("name", "string", "Symbol name to search for (partial match)")],
+            &["name"],
+        ),
+        tool(
+            "find_callers", "Find Callers",
+            "Find all functions that call a given function. \
+             Answers: 'Who calls this function?' and 'What depends on this?'",
+            &[("name", "string", "Function name to find callers of")],
+            &["name"],
+        ),
+        tool(
+            "find_callees", "Find Callees",
+            "Find all functions called by a given function. \
+             Answers: 'What does this function depend on?' and 'What does it call?'",
+            &[("name", "string", "Function name to find callees of")],
+            &["name"],
+        ),
+        tool(
+            "list_structures", "List Structures",
+            "List all functions, classes, configs, documents, and other structures in the codebase. \
+             Optionally filter by file path and/or kind (Function, Class, Config, Document, \
+             Binary, Stylesheet, Section, Style, Element).",
+            &[
+                ("path", "string", "Filter results to entries containing this path substring"),
+                ("kind", "string", "Filter to a specific kind: Function, Class, Config, Document, Binary, Stylesheet, Section, Style, Element"),
+            ],
+            &[],
+        ),
+        tool(
+            "file_stats", "File Statistics",
+            "Get a summary of the indexed codebase: counts of functions, classes, configs, \
+             documents, binaries, styles, etc. Useful for understanding the tech stack and \
+             project structure at a glance.",
+            &[], &[],
+        ),
+        tool(
+            "find_dead_code", "Find Dead Code",
+            "Find functions that are defined but never called anywhere in the codebase. \
+             Helps identify unused code, deprecated functions, and refactoring candidates.",
+            &[], &[],
+        ),
+        tool(
+            "find_dependencies", "Find Dependencies",
+            "List all external package dependencies declared in config files \
+             (package.json dependencies, devDependencies, peerDependencies).",
+            &[], &[],
+        ),
+        tool(
+            "find_entry_points", "Find Entry Points",
+            "Find likely application entry points: main functions, index files, app modules, \
+             server files, and CLI handlers. Answers: 'Where does this application start?'",
+            &[], &[],
+        ),
+        tool(
+            "search_pattern", "Search Pattern",
+            "Search the codebase for a structural code pattern using ast-grep syntax. \
+             Unlike text search, this matches AST structure. Use $NAME for wildcards. \
+             Examples: 'fn $NAME($$$ARGS)' finds all Rust functions, \
+             'console.log($MSG)' finds all console.log calls in JS/TS. \
+             Returns file, line number, and matched text (max 200 results).",
+            &[
+                ("pattern", "string", "ast-grep pattern to search for (use $NAME for wildcards)"),
+                ("language", "string", "Language to search in: python, rust, javascript, typescript, tsx, go, java, c, cpp, csharp, ruby, php, kotlin, swift, scala, bash, lua"),
+            ],
+            &["pattern", "language"],
+        ),
+    ];
 
-fn index_repo_tool() -> Tool {
-    Tool {
-        name: "index_repo".to_string(),
-        title: Some("Index Repository".to_string()),
-        description: Some(
+    if http_mode {
+        t.push(tool(
+            "index_repo", "Index Repository",
             "Clone a git repository and index it into the knowledge graph. \
-             Clears any existing index first. Accepts a git URL (HTTPS or SSH)."
-                .to_string(),
-        ),
-        input_schema: make_tool_input_schema(
+             Clears any existing index first. Accepts a git URL (HTTPS or SSH).",
             &[("url", "string", "Git repository URL to clone and index")],
             &["url"],
-        ),
-        annotations: None,
-        execution: None,
-        icons: vec![],
-        meta: None,
-        output_schema: None,
+        ));
     }
+
+    t
 }
 
 // --- Handler ---
@@ -181,6 +235,41 @@ struct BeretHandler {
 }
 
 impl BeretHandler {
+    fn get_arg<'a>(params: &'a CallToolRequestParams, key: &str) -> Option<&'a str> {
+        params
+            .arguments
+            .as_ref()
+            .and_then(|args| args.get(key))
+            .and_then(|v| v.as_str())
+    }
+
+    fn require_arg<'a>(
+        params: &'a CallToolRequestParams,
+        tool_name: &str,
+        key: &str,
+    ) -> std::result::Result<&'a str, CallToolError> {
+        Self::get_arg(params, key).ok_or_else(|| {
+            CallToolError::invalid_arguments(tool_name, Some(format!("missing '{key}' argument")))
+        })
+    }
+
+    fn ok_json(value: Value) -> std::result::Result<CallToolResult, CallToolError> {
+        let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+        Ok(CallToolResult::text_content(vec![TextContent::new(
+            text, None, None,
+        )]))
+    }
+
+    fn ok_text(msg: String) -> std::result::Result<CallToolResult, CallToolError> {
+        Ok(CallToolResult::text_content(vec![TextContent::new(
+            msg, None, None,
+        )]))
+    }
+
+    fn err(msg: String) -> CallToolError {
+        CallToolError::from_message(msg)
+    }
+
     fn do_refresh(&self) -> std::result::Result<String, String> {
         let root = self.root.read().unwrap().clone();
         self.store.clear().map_err(|e| e.to_string())?;
@@ -192,14 +281,12 @@ impl BeretHandler {
         let temp_dir = std::env::temp_dir().join(format!("beret-{}", hash_url(url)));
 
         if temp_dir.exists() {
-            // Pull latest changes
             std::process::Command::new("git")
                 .args(["pull", "--ff-only"])
                 .current_dir(&temp_dir)
                 .output()
                 .map_err(|e| format!("git pull failed: {e}"))?;
         } else {
-            // Clone fresh
             let status = std::process::Command::new("git")
                 .args(["clone", "--depth", "1", url])
                 .arg(&temp_dir)
@@ -214,14 +301,6 @@ impl BeretHandler {
         self.store.clear().map_err(|e| e.to_string())?;
         let count = ingest(&temp_dir, &self.store).map_err(|e| e.to_string())?;
         Ok(format!("Cloned and indexed {} triples from {}", count, url))
-    }
-
-    fn tools(&self) -> Vec<Tool> {
-        let mut tools = vec![query_codebase_tool(), refresh_index_tool()];
-        if self.http_mode {
-            tools.push(index_repo_tool());
-        }
-        tools
     }
 }
 
@@ -240,7 +319,7 @@ impl ServerHandler for BeretHandler {
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<ListToolsResult, RpcError> {
         Ok(ListToolsResult {
-            tools: self.tools(),
+            tools: all_tools(self.http_mode),
             next_cursor: None,
             meta: None,
         })
@@ -253,64 +332,82 @@ impl ServerHandler for BeretHandler {
     ) -> std::result::Result<CallToolResult, CallToolError> {
         match params.name.as_str() {
             "query_codebase" => {
-                let sparql = params
-                    .arguments
-                    .as_ref()
-                    .and_then(|args| args.get("sparql"))
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        CallToolError::invalid_arguments(
-                            "query_codebase",
-                            Some("missing 'sparql' argument".into()),
-                        )
-                    })?;
-
+                let sparql = Self::require_arg(&params, "query_codebase", "sparql")?;
                 match self.store.query_to_json(sparql) {
-                    Ok(result) => {
-                        let text = serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|_| result.to_string());
-                        Ok(CallToolResult::text_content(vec![
-                            TextContent::new(text, None, None),
-                        ]))
-                    }
-                    Err(e) => Err(CallToolError::from_message(format!(
-                        "SPARQL query error: {e}"
-                    ))),
+                    Ok(v) => Self::ok_json(v),
+                    Err(e) => Err(Self::err(format!("SPARQL query error: {e}"))),
                 }
             }
+
             "refresh_index" => match self.do_refresh() {
-                Ok(msg) => Ok(CallToolResult::text_content(vec![
-                    TextContent::new(msg, None, None),
-                ])),
-                Err(e) => Err(CallToolError::from_message(format!(
-                    "Index refresh error: {e}"
-                ))),
+                Ok(msg) => Self::ok_text(msg),
+                Err(e) => Err(Self::err(format!("Refresh error: {e}"))),
             },
+
+            "find_symbol" => {
+                let name = Self::require_arg(&params, "find_symbol", "name")?;
+                tools::find_symbol(&self.store, name)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "find_callers" => {
+                let name = Self::require_arg(&params, "find_callers", "name")?;
+                tools::find_callers(&self.store, name)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "find_callees" => {
+                let name = Self::require_arg(&params, "find_callees", "name")?;
+                tools::find_callees(&self.store, name)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "list_structures" => {
+                let path = Self::get_arg(&params, "path");
+                let kind = Self::get_arg(&params, "kind");
+                tools::list_structures(&self.store, path, kind)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "file_stats" => {
+                tools::file_stats(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "find_dead_code" => {
+                tools::find_dead_code(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "find_dependencies" => {
+                tools::find_dependencies(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "find_entry_points" => {
+                tools::find_entry_points(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "search_pattern" => {
+                let pattern = Self::require_arg(&params, "search_pattern", "pattern")?;
+                let language = Self::require_arg(&params, "search_pattern", "language")?;
+                let root = self.root.read().unwrap().clone();
+                tools::search_pattern(&root, pattern, language)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
             "index_repo" => {
                 if !self.http_mode {
                     return Err(CallToolError::unknown_tool("index_repo"));
                 }
-                let url = params
-                    .arguments
-                    .as_ref()
-                    .and_then(|args| args.get("url"))
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        CallToolError::invalid_arguments(
-                            "index_repo",
-                            Some("missing 'url' argument".into()),
-                        )
-                    })?;
-
+                let url = Self::require_arg(&params, "index_repo", "url")?;
                 match self.do_index_repo(url) {
-                    Ok(msg) => Ok(CallToolResult::text_content(vec![
-                        TextContent::new(msg, None, None),
-                    ])),
-                    Err(e) => Err(CallToolError::from_message(format!(
-                        "Repository indexing error: {e}"
-                    ))),
+                    Ok(msg) => Self::ok_text(msg),
+                    Err(e) => Err(Self::err(format!("Repository indexing error: {e}"))),
                 }
             }
+
             other => Err(CallToolError::unknown_tool(other)),
         }
     }
@@ -337,8 +434,10 @@ fn make_server_details() -> InitializeResult {
         },
         protocol_version: ProtocolVersion::V2025_11_25.into(),
         instructions: Some(
-            "Use query_codebase to run SPARQL queries against the indexed codebase graph. \
-             Use refresh_index to re-scan files after changes."
+            "Beret indexes your codebase into an RDF knowledge graph. Use the provided tools \
+             to explore architecture, find symbols, trace call graphs, detect dead code, \
+             search for structural patterns, and query with SPARQL. Start with file_stats \
+             for an overview, then use find_entry_points to understand where the app starts."
                 .to_string(),
         ),
         meta: None,
