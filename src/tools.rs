@@ -147,6 +147,223 @@ pub fn find_entry_points(store: &CodebaseStore) -> Result<Value, String> {
     store.query_to_json(&sparql).map_err(|e| e.to_string())
 }
 
+// --- Practice description ---
+
+pub fn describe_practices(store: &CodebaseStore) -> Result<Value, String> {
+    let categories = &[
+        ("ci_cd", "usesCIPlatform"),
+        ("testing", "usesTestFramework"),
+        ("linting", "usesLinter"),
+        ("formatting", "usesFormatter"),
+        ("build_tools", "usesBuildTool"),
+        ("containerization", "usesContainerization"),
+        ("package_managers", "usesPackageManager"),
+        ("type_checking", "usesTypeChecking"),
+        ("architecture_layers", "hasLayer"),
+        ("documentation", "hasDocumentation"),
+        ("conventions", "followsConvention"),
+    ];
+
+    let mut result = Map::new();
+
+    for (label, predicate) in categories {
+        let sparql = format!(
+            r#"SELECT ?value WHERE {{
+                <{P}project> <{P}{predicate}> ?value .
+            }} ORDER BY ?value"#
+        );
+        let rows = store.query_to_json(&sparql).map_err(|e| e.to_string())?;
+        let values: Vec<Value> = rows
+            .as_array()
+            .map_or(&[] as &[Value], |v| v.as_slice())
+            .iter()
+            .filter_map(|row| {
+                row.get("value")
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        Value::String(
+                            s.strip_prefix(&format!("<{P}"))
+                                .and_then(|s| s.strip_suffix('>'))
+                                .unwrap_or(s)
+                                .to_string(),
+                        )
+                    })
+            })
+            .collect();
+        if !values.is_empty() {
+            result.insert(label.to_string(), Value::Array(values));
+        }
+    }
+
+    Ok(Value::Object(result))
+}
+
+/// Helper: query practice values for a single predicate.
+fn query_practice_values(store: &CodebaseStore, predicate: &str) -> Result<Vec<String>, String> {
+    let sparql = format!(
+        r#"SELECT ?value WHERE {{
+            <{P}project> <{P}{predicate}> ?value .
+        }} ORDER BY ?value"#
+    );
+    let rows = store.query_to_json(&sparql).map_err(|e| e.to_string())?;
+    Ok(rows
+        .as_array()
+        .map_or(&[] as &[Value], |v| v.as_slice())
+        .iter()
+        .filter_map(|row| {
+            row.get("value")
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    s.strip_prefix(&format!("<{P}"))
+                        .and_then(|s| s.strip_suffix('>'))
+                        .unwrap_or(s)
+                        .to_string()
+                })
+        })
+        .collect())
+}
+
+/// Helper: count structures of a given type, optionally filtered by path.
+fn count_type(store: &CodebaseStore, kind: &str, path_filter: Option<&str>) -> Result<usize, String> {
+    let mut filter = String::new();
+    if let Some(p) = path_filter {
+        filter = format!(r#"FILTER(CONTAINS(STR(?s), "{p}"))"#);
+    }
+    let sparql = format!(
+        r#"SELECT (COUNT(?s) AS ?count) WHERE {{
+            ?s <{P}a> <{P}{kind}> .
+            {filter}
+        }}"#
+    );
+    let rows = store.query_to_json(&sparql).map_err(|e| e.to_string())?;
+    Ok(rows
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|r| r.get("count"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.trim_matches('"').parse::<usize>().ok())
+        .unwrap_or(0))
+}
+
+pub fn describe_testing(store: &CodebaseStore) -> Result<Value, String> {
+    let frameworks = query_practice_values(store, "usesTestFramework")?;
+    let total_functions = count_type(store, "Function", None)?;
+    let test_functions = count_type(store, "Function", Some("test"))?;
+    let spec_functions = count_type(store, "Function", Some("spec"))?;
+    let test_related = test_functions + spec_functions;
+
+    let mut result = Map::new();
+    result.insert("frameworks".into(), Value::Array(frameworks.into_iter().map(Value::String).collect()));
+    result.insert("total_functions".into(), Value::Number(total_functions.into()));
+    result.insert("test_functions".into(), Value::Number(test_related.into()));
+    if total_functions > 0 {
+        let ratio = (test_related as f64 / total_functions as f64 * 100.0).round() as u64;
+        result.insert("test_ratio_percent".into(), Value::Number(ratio.into()));
+    }
+    Ok(Value::Object(result))
+}
+
+pub fn describe_ci_cd(store: &CodebaseStore) -> Result<Value, String> {
+    let platforms = query_practice_values(store, "usesCIPlatform")?;
+    let containerization = query_practice_values(store, "usesContainerization")?;
+    let build_tools = query_practice_values(store, "usesBuildTool")?;
+    let has_infra = query_practice_values(store, "hasLayer")?
+        .iter()
+        .any(|l| l == "infrastructure");
+
+    let mut result = Map::new();
+    result.insert("ci_platforms".into(), Value::Array(platforms.into_iter().map(Value::String).collect()));
+    result.insert("containerization".into(), Value::Array(containerization.into_iter().map(Value::String).collect()));
+    result.insert("build_tools".into(), Value::Array(build_tools.into_iter().map(Value::String).collect()));
+    result.insert("has_infrastructure_as_code".into(), Value::Bool(has_infra));
+    Ok(Value::Object(result))
+}
+
+pub fn describe_code_quality(store: &CodebaseStore) -> Result<Value, String> {
+    let linters = query_practice_values(store, "usesLinter")?;
+    let formatters = query_practice_values(store, "usesFormatter")?;
+    let type_checkers = query_practice_values(store, "usesTypeChecking")?;
+    let conventions = query_practice_values(store, "followsConvention")?;
+
+    let mut result = Map::new();
+    result.insert("linters".into(), Value::Array(linters.into_iter().map(Value::String).collect()));
+    result.insert("formatters".into(), Value::Array(formatters.into_iter().map(Value::String).collect()));
+    result.insert("type_checkers".into(), Value::Array(type_checkers.into_iter().map(Value::String).collect()));
+    result.insert("conventions".into(), Value::Array(conventions.into_iter().map(Value::String).collect()));
+    Ok(Value::Object(result))
+}
+
+pub fn describe_architecture(store: &CodebaseStore) -> Result<Value, String> {
+    let layers = query_practice_values(store, "hasLayer")?;
+    let pkg_managers = query_practice_values(store, "usesPackageManager")?;
+
+    let function_count = count_type(store, "Function", None)?;
+    let class_count = count_type(store, "Class", None)?;
+    let config_count = count_type(store, "Config", None)?;
+    let doc_count = count_type(store, "Document", None)?;
+    let binary_count = count_type(store, "Binary", None)?;
+    let is_monorepo = layers.iter().any(|l| l == "monorepo-packages");
+
+    let mut result = Map::new();
+    result.insert("layers".into(), Value::Array(layers.into_iter().map(Value::String).collect()));
+    result.insert("package_managers".into(), Value::Array(pkg_managers.into_iter().map(Value::String).collect()));
+    result.insert("is_monorepo".into(), Value::Bool(is_monorepo));
+
+    let mut counts = Map::new();
+    counts.insert("functions".into(), Value::Number(function_count.into()));
+    counts.insert("classes".into(), Value::Number(class_count.into()));
+    counts.insert("config_files".into(), Value::Number(config_count.into()));
+    counts.insert("documents".into(), Value::Number(doc_count.into()));
+    counts.insert("binary_assets".into(), Value::Number(binary_count.into()));
+    result.insert("counts".into(), Value::Object(counts));
+
+    Ok(Value::Object(result))
+}
+
+pub fn describe_documentation(store: &CodebaseStore) -> Result<Value, String> {
+    let docs = query_practice_values(store, "hasDocumentation")?;
+    let has_docs_layer = query_practice_values(store, "hasLayer")?
+        .iter()
+        .any(|l| l == "documentation");
+    let doc_file_count = count_type(store, "Document", None)?;
+    let section_count = count_type(store, "Section", None)?;
+
+    let mut result = Map::new();
+    result.insert("documentation_artifacts".into(), Value::Array(docs.into_iter().map(Value::String).collect()));
+    result.insert("has_docs_directory".into(), Value::Bool(has_docs_layer));
+    result.insert("document_files".into(), Value::Number(doc_file_count.into()));
+    result.insert("total_sections".into(), Value::Number(section_count.into()));
+    Ok(Value::Object(result))
+}
+
+pub fn describe_dependencies(store: &CodebaseStore) -> Result<Value, String> {
+    let pkg_managers = query_practice_values(store, "usesPackageManager")?;
+    let has_auto_updates = query_practice_values(store, "followsConvention")?
+        .iter()
+        .any(|c| c == "automated-dependency-updates");
+
+    // Count declared dependencies
+    let dep_sparql = format!(
+        r#"SELECT (COUNT(?dep) AS ?count) WHERE {{
+            ?file <{P}dependsOn> ?dep .
+        }}"#
+    );
+    let dep_rows = store.query_to_json(&dep_sparql).map_err(|e| e.to_string())?;
+    let dep_count = dep_rows
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|r| r.get("count"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.trim_matches('"').parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let mut result = Map::new();
+    result.insert("package_managers".into(), Value::Array(pkg_managers.into_iter().map(Value::String).collect()));
+    result.insert("declared_dependencies".into(), Value::Number(dep_count.into()));
+    result.insert("has_automated_updates".into(), Value::Bool(has_auto_updates));
+    Ok(Value::Object(result))
+}
+
 // --- Live ast-grep pattern search ---
 
 pub fn search_pattern(root: &Path, pattern: &str, language: &str, limit: usize) -> Result<Value, String> {

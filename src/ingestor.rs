@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -523,13 +524,174 @@ fn process_binary_file(path: &Path, triples: &mut Vec<Triple>) {
     }
 }
 
+// --- Practice detection ---
+
+/// Detect engineering practices from file presence and path patterns.
+/// Returns (predicate, object) pairs for the `<project>` subject.
+fn detect_practice(path: &Path, file_name: &str) -> Option<(&'static str, &'static str)> {
+    let path_str = path.to_string_lossy();
+
+    // CI/CD platforms
+    if path_str.contains(".github/workflows/") && file_name.ends_with(".yml") {
+        return Some(("usesCIPlatform", "github-actions"));
+    }
+    match file_name {
+        ".gitlab-ci.yml" => return Some(("usesCIPlatform", "gitlab-ci")),
+        "Jenkinsfile" => return Some(("usesCIPlatform", "jenkins")),
+        ".travis.yml" => return Some(("usesCIPlatform", "travis")),
+        _ => {}
+    }
+    if path_str.contains(".circleci/") && file_name == "config.yml" {
+        return Some(("usesCIPlatform", "circleci"));
+    }
+
+    // Containerization
+    match file_name {
+        "Dockerfile" | ".dockerignore" => return Some(("usesContainerization", "docker")),
+        "docker-compose.yml" | "docker-compose.yaml" => return Some(("usesContainerization", "docker-compose")),
+        _ => {}
+    }
+
+    // Build tools
+    match file_name {
+        "Makefile" | "makefile" | "GNUmakefile" => return Some(("usesBuildTool", "make")),
+        "build.gradle" | "build.gradle.kts" => return Some(("usesBuildTool", "gradle")),
+        "pom.xml" => return Some(("usesBuildTool", "maven")),
+        "CMakeLists.txt" => return Some(("usesBuildTool", "cmake")),
+        _ => {}
+    }
+
+    // Linters
+    if file_name.starts_with(".eslintrc") || file_name == ".eslintignore" {
+        return Some(("usesLinter", "eslint"));
+    }
+    match file_name {
+        "biome.json" | "biome.jsonc" => return Some(("usesLinter", "biome")),
+        "ruff.toml" | ".ruff.toml" => return Some(("usesLinter", "ruff")),
+        ".rubocop.yml" => return Some(("usesLinter", "rubocop")),
+        ".stylelintrc" | "stylelint.config.js" => return Some(("usesLinter", "stylelint")),
+        _ => {}
+    }
+
+    // Formatters
+    if file_name.starts_with(".prettierrc") || file_name.starts_with("prettier.config") {
+        return Some(("usesFormatter", "prettier"));
+    }
+    if file_name == ".editorconfig" {
+        return Some(("usesFormatter", "editorconfig"));
+    }
+
+    // Test frameworks
+    if file_name.starts_with("jest.config") {
+        return Some(("usesTestFramework", "jest"));
+    }
+    if file_name.starts_with("vitest.config") {
+        return Some(("usesTestFramework", "vitest"));
+    }
+    if file_name.starts_with("cypress.config") {
+        return Some(("usesTestFramework", "cypress"));
+    }
+    if file_name.starts_with("playwright.config") {
+        return Some(("usesTestFramework", "playwright"));
+    }
+    match file_name {
+        "pytest.ini" | "conftest.py" | "setup.cfg" => return Some(("usesTestFramework", "pytest")),
+        ".mocharc.yml" | ".mocharc.json" => return Some(("usesTestFramework", "mocha")),
+        _ => {}
+    }
+    if file_name.starts_with("karma.conf") {
+        return Some(("usesTestFramework", "karma"));
+    }
+
+    // Type checking
+    match file_name {
+        "tsconfig.json" => return Some(("usesTypeChecking", "typescript")),
+        "jsconfig.json" => return Some(("usesTypeChecking", "javascript-jsdoc")),
+        "mypy.ini" | ".mypy.ini" => return Some(("usesTypeChecking", "mypy")),
+        _ => {}
+    }
+
+    // Package managers
+    match file_name {
+        "package.json" => return Some(("usesPackageManager", "npm")),
+        "yarn.lock" => return Some(("usesPackageManager", "yarn")),
+        "pnpm-lock.yaml" => return Some(("usesPackageManager", "pnpm")),
+        "bun.lockb" | "bun.lock" => return Some(("usesPackageManager", "bun")),
+        "Cargo.toml" => return Some(("usesPackageManager", "cargo")),
+        "go.mod" => return Some(("usesPackageManager", "go-modules")),
+        "requirements.txt" | "Pipfile" => return Some(("usesPackageManager", "pip")),
+        "poetry.lock" => return Some(("usesPackageManager", "poetry")),
+        "Gemfile" => return Some(("usesPackageManager", "bundler")),
+        "composer.json" => return Some(("usesPackageManager", "composer")),
+        _ => {}
+    }
+
+    // Documentation
+    match file_name {
+        "CONTRIBUTING.md" | "CONTRIBUTING" => return Some(("hasDocumentation", "contributing-guide")),
+        "SECURITY.md" | "SECURITY.txt" | "SECURITY" => return Some(("hasDocumentation", "security-policy")),
+        "CHANGELOG.md" | "CHANGELOG" | "CHANGES.md" => return Some(("hasDocumentation", "changelog")),
+        "LICENSE" | "LICENSE.md" | "LICENSE.txt" => return Some(("hasDocumentation", "license")),
+        "CODEOWNERS" => return Some(("hasDocumentation", "codeowners")),
+        "CODE_OF_CONDUCT.md" => return Some(("hasDocumentation", "code-of-conduct")),
+        _ => {}
+    }
+    if path_str.contains(".github/ISSUE_TEMPLATE") {
+        return Some(("hasDocumentation", "issue-templates"));
+    }
+    if path_str.contains("PULL_REQUEST_TEMPLATE") {
+        return Some(("hasDocumentation", "pr-template"));
+    }
+
+    // Conventions
+    if file_name.starts_with(".commitlintrc") || file_name.starts_with("commitlint.config") {
+        return Some(("followsConvention", "conventional-commits"));
+    }
+    if path_str.contains(".husky/") {
+        return Some(("followsConvention", "git-hooks"));
+    }
+    if file_name.starts_with(".lintstagedrc") || file_name.starts_with("lint-staged.config") {
+        return Some(("followsConvention", "lint-staged"));
+    }
+    match file_name {
+        "renovate.json" | ".renovaterc" => return Some(("followsConvention", "automated-dependency-updates")),
+        _ => {}
+    }
+    if path_str.contains(".dependabot/") || file_name == "dependabot.yml" {
+        return Some(("followsConvention", "automated-dependency-updates"));
+    }
+
+    None
+}
+
+/// Map directory names to architecture layer labels.
+fn detect_layer(dir_name: &str) -> Option<&'static str> {
+    match dir_name {
+        "src" | "lib" | "app" => Some("source"),
+        "test" | "tests" | "__tests__" | "spec" | "specs" => Some("tests"),
+        "docs" | "doc" | "documentation" => Some("documentation"),
+        "scripts" | "bin" | "tools" => Some("scripts"),
+        "config" | "configs" => Some("configuration"),
+        "packages" | "modules" | "crates" | "workspaces" => Some("monorepo-packages"),
+        "api" | "routes" | "endpoints" => Some("api"),
+        "components" | "views" | "pages" => Some("ui"),
+        "models" | "entities" | "domain" => Some("domain"),
+        "services" | "providers" => Some("services"),
+        "middleware" | "interceptors" => Some("middleware"),
+        "utils" | "helpers" | "common" | "shared" => Some("utilities"),
+        "migrations" | "seeds" => Some("database"),
+        "deploy" | "infra" | "terraform" | "k8s" | "kubernetes" => Some("infrastructure"),
+        _ => None,
+    }
+}
+
 // --- Main ingestion pipeline ---
 
 pub fn ingest(root: &Path, store: &CodebaseStore) -> Result<usize, Box<dyn std::error::Error>> {
     let all_triples: Mutex<Vec<Triple>> = Mutex::new(Vec::new());
 
     WalkBuilder::new(root)
-        .hidden(true)
+        .hidden(false)
         .build_parallel()
         .visit(&mut TripleVisitorBuilder {
             triples: &all_triples,
@@ -554,6 +716,8 @@ impl<'a> ignore::ParallelVisitorBuilder<'a> for TripleVisitorBuilder<'a> {
         Box::new(TripleVisitor {
             shared: self.triples,
             local: Vec::new(),
+            seen_practices: HashSet::new(),
+            seen_layers: HashSet::new(),
         })
     }
 }
@@ -561,6 +725,8 @@ impl<'a> ignore::ParallelVisitorBuilder<'a> for TripleVisitorBuilder<'a> {
 struct TripleVisitor<'a> {
     shared: &'a Mutex<Vec<Triple>>,
     local: Vec<Triple>,
+    seen_practices: HashSet<(&'static str, &'static str)>,
+    seen_layers: HashSet<&'static str>,
 }
 
 impl Drop for TripleVisitor<'_> {
@@ -587,6 +753,34 @@ impl ignore::ParallelVisitor for TripleVisitor<'_> {
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        // 0. Detect engineering practices from file presence
+        if let Some(practice) = detect_practice(path, file_name) {
+            if self.seen_practices.insert(practice) {
+                self.local.push(Triple {
+                    subject: "project".into(),
+                    predicate: practice.0.into(),
+                    object: practice.1.into(),
+                });
+            }
+        }
+
+        // Detect architecture layers from directory names
+        for component in path.components() {
+            if let std::path::Component::Normal(name) = component {
+                if let Some(name_str) = name.to_str() {
+                    if let Some(layer) = detect_layer(name_str) {
+                        if self.seen_layers.insert(layer) {
+                            self.local.push(Triple {
+                                subject: "project".into(),
+                                predicate: "hasLayer".into(),
+                                object: layer.into(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         // 1. Try AST-based code extraction
         if let Some(config) = lang_config_for_ext(ext) {
@@ -852,5 +1046,59 @@ mod tests {
         );
         assert!(count >= 5000 * 5, "expected at least 25000 triples, got {}", count);
         eprintln!("Ingested {} triples from 5000 files in {:.3}s", count, elapsed.as_secs_f64());
+    }
+
+    #[test]
+    fn ingest_detects_practices() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create practice signal files
+        let workflows = dir.path().join(".github/workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        fs::write(workflows.join("ci.yml"), "name: CI").unwrap();
+        fs::write(dir.path().join("package.json"), r#"{"name":"test"}"#).unwrap();
+        fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        fs::write(dir.path().join(".eslintrc.json"), "{}").unwrap();
+        fs::write(dir.path().join(".prettierrc"), "{}").unwrap();
+        fs::write(dir.path().join("Dockerfile"), "FROM node").unwrap();
+        fs::write(dir.path().join("LICENSE"), "MIT").unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::create_dir_all(dir.path().join("tests")).unwrap();
+        fs::write(dir.path().join("src/app.js"), "function main() {}").unwrap();
+        fs::write(dir.path().join("tests/app.test.js"), "test('it', () => {})").unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        // Check CI/CD detection
+        let ci = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesCIPlatform> ?v }"
+        ).unwrap();
+        assert!(!ci.as_array().unwrap().is_empty(), "should detect github-actions");
+
+        // Check package manager
+        let pm = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesPackageManager> ?v }"
+        ).unwrap();
+        assert!(!pm.as_array().unwrap().is_empty(), "should detect npm");
+
+        // Check linter
+        let lint = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesLinter> ?v }"
+        ).unwrap();
+        assert!(!lint.as_array().unwrap().is_empty(), "should detect eslint");
+
+        // Check architecture layers
+        let layers = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/hasLayer> ?v }"
+        ).unwrap();
+        let layer_count = layers.as_array().unwrap().len();
+        assert!(layer_count >= 2, "should detect source + tests layers, got {}", layer_count);
+
+        // Check containerization
+        let docker = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesContainerization> ?v }"
+        ).unwrap();
+        assert!(!docker.as_array().unwrap().is_empty(), "should detect docker");
     }
 }

@@ -260,6 +260,54 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             ],
             &[],
         ),
+        tool(
+            "describe_practices", "Describe Practices",
+            "High-level summary of all software engineering practices detected in the codebase. \
+             For deeper analysis, use the category-specific tools: describe_testing, \
+             describe_ci_cd, describe_code_quality, describe_architecture, \
+             describe_documentation, describe_dependencies.",
+            &[], &[],
+        ),
+        tool(
+            "describe_testing", "Describe Testing",
+            "Analyze testing practices: frameworks in use (jest, pytest, cypress, etc.), \
+             count of test functions vs total functions, and test-to-code ratio.",
+            &[], &[],
+        ),
+        tool(
+            "describe_ci_cd", "Describe CI/CD",
+            "Analyze CI/CD and deployment practices: CI platforms (GitHub Actions, GitLab CI, \
+             Jenkins, etc.), containerization (Docker, docker-compose), build tools (make, \
+             gradle, maven), and infrastructure-as-code presence.",
+            &[], &[],
+        ),
+        tool(
+            "describe_code_quality", "Describe Code Quality",
+            "Analyze code quality tooling: linters (eslint, biome, ruff, rubocop), formatters \
+             (prettier, editorconfig), type checkers (typescript, mypy), and conventions \
+             (conventional-commits, git-hooks, lint-staged).",
+            &[], &[],
+        ),
+        tool(
+            "describe_architecture", "Describe Architecture",
+            "Analyze codebase architecture: detected layers (source, tests, api, ui, domain, \
+             services, infrastructure, etc.), monorepo detection, package managers, and \
+             counts of functions, classes, configs, documents, and binary assets.",
+            &[], &[],
+        ),
+        tool(
+            "describe_documentation", "Describe Documentation",
+            "Analyze documentation culture: documentation artifacts present (contributing guide, \
+             changelog, license, code of conduct, security policy, codeowners, issue/PR templates), \
+             docs directory presence, document file count, and total sections.",
+            &[], &[],
+        ),
+        tool(
+            "describe_dependencies", "Describe Dependencies",
+            "Analyze dependency management: package managers in use, total declared dependencies, \
+             and whether automated dependency updates (Renovate, Dependabot) are configured.",
+            &[], &[],
+        ),
     ];
 
     if http_mode {
@@ -548,6 +596,41 @@ impl ServerHandler for BeretHandler {
                 let limit = Self::get_limit(&params, 200);
                 tools::generate_diagram(&self.store, path, depth, limit)
                     .map_or_else(|e| Err(Self::err(e)), Self::ok_text)
+            }
+
+            "describe_practices" => {
+                tools::describe_practices(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "describe_testing" => {
+                tools::describe_testing(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "describe_ci_cd" => {
+                tools::describe_ci_cd(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "describe_code_quality" => {
+                tools::describe_code_quality(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "describe_architecture" => {
+                tools::describe_architecture(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "describe_documentation" => {
+                tools::describe_documentation(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "describe_dependencies" => {
+                tools::describe_dependencies(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
             }
 
             "index_repo" => {
