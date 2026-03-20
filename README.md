@@ -48,35 +48,47 @@ After connecting, ask the agent to index a directory (e.g., "index the current p
 
 ## Tools
 
+All list-returning tools support `limit` and `offset` parameters for pagination. When results exceed the limit, the response includes `has_more: true` and `next_offset` so the LLM can request the next page.
+
 ### Exploration tools
 
-| Tool | Parameters | What it does |
-|------|-----------|-------------|
-| `file_stats` | — | Count of functions, classes, configs, documents, binaries, etc. Start here for a project overview. |
-| `find_entry_points` | — | Find main functions, index files, app/server/cli modules. Answers: "Where does this app start?" |
-| `list_structures` | `path?`, `kind?` | List all indexed structures. Filter by file path substring and/or kind (`Function`, `Class`, `Config`, `Document`, `Binary`, `Stylesheet`, `Section`, `Style`, `Element`). |
-| `find_symbol` | `name` | Find where a function, class, struct, or module is defined. Partial name match. |
+| Tool | Parameters | Default limit | What it does |
+|------|-----------|--------------|-------------|
+| `file_stats` | — | — | Count of functions, classes, configs, documents, binaries, etc. Start here for a project overview. |
+| `find_entry_points` | `limit?`, `offset?` | 100 | Find main functions, index files, app/server/cli modules. Answers: "Where does this app start?" |
+| `list_structures` | `path?`, `kind?`, `limit?`, `offset?` | 200 | List all indexed structures. Filter by path substring and/or kind (`Function`, `Class`, `Config`, `Document`, `Binary`, `Stylesheet`, `Section`, `Style`, `Element`). |
+| `find_symbol` | `name`, `limit?`, `offset?` | 100 | Find where a function, class, struct, or module is defined. Partial name match. |
 
 ### Call graph tools
 
-| Tool | Parameters | What it does |
-|------|-----------|-------------|
-| `find_callers` | `name` | Who calls this function? Trace upstream dependencies and find fragile coupling. |
-| `find_callees` | `name` | What does this function call? Trace downstream dependencies. |
-| `find_dead_code` | — | Functions defined but never called anywhere. Find unused code and refactoring candidates. |
+| Tool | Parameters | Default limit | What it does |
+|------|-----------|--------------|-------------|
+| `find_callers` | `name`, `limit?`, `offset?` | 100 | Who calls this function? Trace upstream dependencies and find fragile coupling. |
+| `find_callees` | `name`, `limit?`, `offset?` | 100 | What does this function call? Trace downstream dependencies. |
+| `find_dead_code` | `limit?`, `offset?` | 100 | Functions defined but never called anywhere. Find unused code and refactoring candidates. |
 
 ### Dependency & config tools
 
-| Tool | Parameters | What it does |
-|------|-----------|-------------|
-| `find_dependencies` | — | List all external package dependencies from package.json (dependencies, devDependencies, peerDependencies). |
+| Tool | Parameters | Default limit | What it does |
+|------|-----------|--------------|-------------|
+| `find_dependencies` | `limit?`, `offset?` | 200 | List all external package dependencies from package.json (dependencies, devDependencies, peerDependencies). |
 
 ### Code search tools
 
-| Tool | Parameters | What it does |
-|------|-----------|-------------|
-| `search_pattern` | `pattern`, `language` | Structural AST search using ast-grep syntax. Unlike text search, matches code structure. Use `$NAME` for wildcards, `$$$ARGS` for variadic. Returns file, line, and matched text (max 200 results). |
-| `query_codebase` | `sparql` | Raw SPARQL SELECT/ASK against the knowledge graph for advanced queries. |
+| Tool | Parameters | Default limit | What it does |
+|------|-----------|--------------|-------------|
+| `search_pattern` | `pattern`, `language`, `limit?`, `offset?` | 200 | Structural AST search using ast-grep syntax. Unlike text search, matches code structure. Use `$NAME` for wildcards, `$$$ARGS` for variadic. |
+| `query_codebase` | `sparql`, `limit?`, `offset?` | 500 | Raw SPARQL SELECT/ASK against the knowledge graph for advanced queries. |
+
+### Visualization tools
+
+| Tool | Parameters | Default limit | What it does |
+|------|-----------|--------------|-------------|
+| `generate_diagram` | `path?`, `depth?`, `limit?` | 200 elements | Generate a [LikeC4](https://likec4.dev) architecture diagram from the indexed codebase. Returns `.c4` DSL text. |
+
+`depth` controls nesting: `1` = directories only, `2` = directories + files (default), `3` = directories + files + functions/classes.
+
+Output can be pasted into [playground.likec4.dev](https://playground.likec4.dev/), saved as a `.c4` file, or rendered with `npx likec4`.
 
 ### Index management tools
 
@@ -84,6 +96,22 @@ After connecting, ask the agent to index a directory (e.g., "index the current p
 |------|-----------|-------------|
 | `refresh_index` | `path?` | Index a directory and build the knowledge graph. If `path` is given, indexes that directory. If omitted, re-indexes the last path (or cwd). Call this first before using other tools. |
 | `index_repo` *(HTTP only)* | `url` | Clone a git repo (or pull if already cloned) and index it. |
+
+### Pagination
+
+When results are paginated, the response wraps results with metadata:
+
+```json
+{
+  "results": [...],
+  "total": 1847,
+  "returned": 200,
+  "offset": 0,
+  "has_more": true,
+  "next_offset": 200,
+  "message": "Showing 1–200 of 1847 results. Use offset: 200 to see the next page."
+}
+```
 
 ### `search_pattern` examples
 

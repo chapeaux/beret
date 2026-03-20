@@ -133,7 +133,11 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              The graph uses the repo: prefix (http://repo.example.org/). \
              Triples include: <file/func> a repo:Function, <file/class> a repo:Class, \
              <caller> repo:calls <callee>, <file> repo:dependsOn <pkg>, etc.",
-            &[("sparql", "string", "A SPARQL query string")],
+            &[
+                ("sparql", "string", "A SPARQL query string"),
+                ("limit", "integer", "Maximum number of results per page (default: 500)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
+            ],
             &["sparql"],
         ),
         tool(
@@ -149,21 +153,33 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             "find_symbol", "Find Symbol",
             "Find where a function, class, struct, or module is defined by name. \
              Returns all definitions whose name contains the search term.",
-            &[("name", "string", "Symbol name to search for (partial match)")],
+            &[
+                ("name", "string", "Symbol name to search for (partial match)"),
+                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
+            ],
             &["name"],
         ),
         tool(
             "find_callers", "Find Callers",
             "Find all functions that call a given function. \
              Answers: 'Who calls this function?' and 'What depends on this?'",
-            &[("name", "string", "Function name to find callers of")],
+            &[
+                ("name", "string", "Function name to find callers of"),
+                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
+            ],
             &["name"],
         ),
         tool(
             "find_callees", "Find Callees",
             "Find all functions called by a given function. \
              Answers: 'What does this function depend on?' and 'What does it call?'",
-            &[("name", "string", "Function name to find callees of")],
+            &[
+                ("name", "string", "Function name to find callees of"),
+                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
+            ],
             &["name"],
         ),
         tool(
@@ -174,6 +190,8 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             &[
                 ("path", "string", "Filter results to entries containing this path substring"),
                 ("kind", "string", "Filter to a specific kind: Function, Class, Config, Document, Binary, Stylesheet, Section, Style, Element"),
+                ("limit", "integer", "Maximum number of results per page (default: 200)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &[],
         ),
@@ -188,19 +206,31 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             "find_dead_code", "Find Dead Code",
             "Find functions that are defined but never called anywhere in the codebase. \
              Helps identify unused code, deprecated functions, and refactoring candidates.",
-            &[], &[],
+            &[
+                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
+            ],
+            &[],
         ),
         tool(
             "find_dependencies", "Find Dependencies",
             "List all external package dependencies declared in config files \
              (package.json dependencies, devDependencies, peerDependencies).",
-            &[], &[],
+            &[
+                ("limit", "integer", "Maximum number of results per page (default: 200)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
+            ],
+            &[],
         ),
         tool(
             "find_entry_points", "Find Entry Points",
             "Find likely application entry points: main functions, index files, app modules, \
              server files, and CLI handlers. Answers: 'Where does this application start?'",
-            &[], &[],
+            &[
+                ("limit", "integer", "Maximum number of results per page (default: 100)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
+            ],
+            &[],
         ),
         tool(
             "search_pattern", "Search Pattern",
@@ -208,12 +238,27 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              Unlike text search, this matches AST structure. Use $NAME for wildcards. \
              Examples: 'fn $NAME($$$ARGS)' finds all Rust functions, \
              'console.log($MSG)' finds all console.log calls in JS/TS. \
-             Returns file, line number, and matched text (max 200 results).",
+             Returns file, line number, and matched text.",
             &[
                 ("pattern", "string", "ast-grep pattern to search for (use $NAME for wildcards)"),
                 ("language", "string", "Language to search in: python, rust, javascript, typescript, tsx, go, java, c, cpp, csharp, ruby, php, kotlin, swift, scala, bash, lua"),
+                ("limit", "integer", "Maximum number of results per page (default: 200)"),
+                ("offset", "integer", "Number of results to skip for pagination (default: 0)"),
             ],
             &["pattern", "language"],
+        ),
+        tool(
+            "generate_diagram", "Generate Diagram",
+            "Generate a LikeC4 architecture diagram from the indexed codebase. \
+             Returns LikeC4 DSL text that can be pasted into playground.likec4.dev, \
+             saved as a .c4 file, or rendered with `npx likec4`. \
+             Use depth to control detail level: 1=directories, 2=+files, 3=+functions/classes.",
+            &[
+                ("path", "string", "Focus on a subdirectory (default: entire codebase)"),
+                ("depth", "integer", "Nesting depth: 1=directories, 2=+files, 3=+functions/classes (default: 2)"),
+                ("limit", "integer", "Maximum number of elements to include (default: 200)"),
+            ],
+            &[],
         ),
     ];
 
@@ -272,6 +317,69 @@ impl BeretHandler {
 
     fn err(msg: String) -> CallToolError {
         CallToolError::from_message(msg)
+    }
+
+    fn get_limit(params: &CallToolRequestParams, default: usize) -> usize {
+        params
+            .arguments
+            .as_ref()
+            .and_then(|args| args.get("limit"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(default)
+    }
+
+    fn get_offset(params: &CallToolRequestParams) -> usize {
+        params
+            .arguments
+            .as_ref()
+            .and_then(|args| args.get("offset"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(0)
+    }
+
+    fn ok_json_limited(
+        value: Value,
+        limit: usize,
+        offset: usize,
+    ) -> std::result::Result<CallToolResult, CallToolError> {
+        match value {
+            Value::Array(arr) => {
+                let total = arr.len();
+                let returned: Vec<Value> = arr.into_iter().skip(offset).take(limit).collect();
+                let count = returned.len();
+                let has_more = offset + count < total;
+
+                let mut wrapper = Map::new();
+                wrapper.insert("results".into(), Value::Array(returned));
+                wrapper.insert("total".into(), Value::Number(total.into()));
+                wrapper.insert("returned".into(), Value::Number(count.into()));
+                wrapper.insert("offset".into(), Value::Number(offset.into()));
+                wrapper.insert("has_more".into(), Value::Bool(has_more));
+                if has_more {
+                    let next = offset + count;
+                    wrapper.insert("next_offset".into(), Value::Number(next.into()));
+                    wrapper.insert(
+                        "message".into(),
+                        Value::String(format!(
+                            "Showing {}\u{2013}{} of {} results. Use offset: {} to see the next page.",
+                            offset + 1,
+                            offset + count,
+                            total,
+                            next
+                        )),
+                    );
+                }
+
+                let text = serde_json::to_string_pretty(&Value::Object(wrapper))
+                    .unwrap_or_default();
+                Ok(CallToolResult::text_content(vec![TextContent::new(
+                    text, None, None,
+                )]))
+            }
+            other => Self::ok_json(other),
+        }
     }
 
     fn do_refresh(&self, path: Option<&str>) -> std::result::Result<String, String> {
@@ -343,8 +451,10 @@ impl ServerHandler for BeretHandler {
         match params.name.as_str() {
             "query_codebase" => {
                 let sparql = Self::require_arg(&params, "query_codebase", "sparql")?;
+                let limit = Self::get_limit(&params, 500);
+                let offset = Self::get_offset(&params);
                 match self.store.query_to_json(sparql) {
-                    Ok(v) => Self::ok_json(v),
+                    Ok(v) => Self::ok_json_limited(v, limit, offset),
                     Err(e) => Err(Self::err(format!("SPARQL query error: {e}"))),
                 }
             }
@@ -359,27 +469,35 @@ impl ServerHandler for BeretHandler {
 
             "find_symbol" => {
                 let name = Self::require_arg(&params, "find_symbol", "name")?;
+                let limit = Self::get_limit(&params, 100);
+                let offset = Self::get_offset(&params);
                 tools::find_symbol(&self.store, name)
-                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+                    .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "find_callers" => {
                 let name = Self::require_arg(&params, "find_callers", "name")?;
+                let limit = Self::get_limit(&params, 100);
+                let offset = Self::get_offset(&params);
                 tools::find_callers(&self.store, name)
-                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+                    .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "find_callees" => {
                 let name = Self::require_arg(&params, "find_callees", "name")?;
+                let limit = Self::get_limit(&params, 100);
+                let offset = Self::get_offset(&params);
                 tools::find_callees(&self.store, name)
-                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+                    .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "list_structures" => {
                 let path = Self::get_arg(&params, "path");
                 let kind = Self::get_arg(&params, "kind");
+                let limit = Self::get_limit(&params, 200);
+                let offset = Self::get_offset(&params);
                 tools::list_structures(&self.store, path, kind)
-                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+                    .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "file_stats" => {
@@ -388,26 +506,48 @@ impl ServerHandler for BeretHandler {
             }
 
             "find_dead_code" => {
+                let limit = Self::get_limit(&params, 100);
+                let offset = Self::get_offset(&params);
                 tools::find_dead_code(&self.store)
-                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+                    .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "find_dependencies" => {
+                let limit = Self::get_limit(&params, 200);
+                let offset = Self::get_offset(&params);
                 tools::find_dependencies(&self.store)
-                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+                    .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "find_entry_points" => {
+                let limit = Self::get_limit(&params, 100);
+                let offset = Self::get_offset(&params);
                 tools::find_entry_points(&self.store)
-                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+                    .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
             }
 
             "search_pattern" => {
                 let pattern = Self::require_arg(&params, "search_pattern", "pattern")?;
                 let language = Self::require_arg(&params, "search_pattern", "language")?;
+                let limit = Self::get_limit(&params, 200);
+                let offset = Self::get_offset(&params);
                 let root = self.root.read().unwrap().clone();
-                tools::search_pattern(&root, pattern, language)
-                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+                tools::search_pattern(&root, pattern, language, offset + limit)
+                    .map_or_else(|e| Err(Self::err(e)), |v| Self::ok_json_limited(v, limit, offset))
+            }
+
+            "generate_diagram" => {
+                let path = Self::get_arg(&params, "path");
+                let depth = params
+                    .arguments
+                    .as_ref()
+                    .and_then(|args| args.get("depth"))
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(2);
+                let limit = Self::get_limit(&params, 200);
+                tools::generate_diagram(&self.store, path, depth, limit)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_text)
             }
 
             "index_repo" => {
