@@ -435,9 +435,16 @@ pub fn search_pattern(root: &Path, pattern: &str, language: &str, limit: usize) 
 
 /// Convert a string to a valid LikeC4 identifier (alphanumeric + underscore).
 fn to_id(s: &str) -> String {
-    s.chars()
+    let id: String = s
+        .chars()
         .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
-        .collect()
+        .collect();
+    // Ensure it starts with a letter (LikeC4 requirement)
+    if id.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{id}")
+    } else {
+        id
+    }
 }
 
 /// Strip the repo IRI prefix, returning just the local name.
@@ -447,53 +454,88 @@ fn strip_iri(s: &str) -> &str {
         .unwrap_or(s)
 }
 
+fn tech_from_ext(file: &str) -> Option<&'static str> {
+    let ext = file.rsplit('.').next()?;
+    match ext {
+        "rs" => Some("Rust"), "py" => Some("Python"),
+        "js" | "mjs" | "cjs" => Some("JavaScript"),
+        "ts" => Some("TypeScript"), "tsx" => Some("TSX"),
+        "go" => Some("Go"), "java" => Some("Java"),
+        "c" | "h" => Some("C"), "cpp" | "cc" | "cxx" | "hpp" => Some("C++"),
+        "cs" => Some("C#"), "rb" => Some("Ruby"), "php" => Some("PHP"),
+        "kt" | "kts" => Some("Kotlin"), "swift" => Some("Swift"),
+        "scala" | "sc" => Some("Scala"), "sh" | "bash" => Some("Bash"),
+        "lua" => Some("Lua"), "json" => Some("JSON"),
+        "yml" | "yaml" => Some("YAML"), "md" | "markdown" => Some("Markdown"),
+        "html" | "htm" => Some("HTML"), "css" => Some("CSS"),
+        _ => None,
+    }
+}
+
 pub fn generate_diagram(
     store: &CodebaseStore,
     scope: Option<&str>,
     depth: usize,
+    code_only: bool,
+    exclude: &[String],
     limit: usize,
 ) -> std::result::Result<String, String> {
     // 1. Query all structures
-    let mut filter = String::new();
+    let mut filters = Vec::new();
     if let Some(p) = scope {
-        filter = format!(r#"FILTER(CONTAINS(STR(?subject), "{p}"))"#);
+        filters.push(format!(r#"FILTER(CONTAINS(STR(?subject), "{p}"))"#));
     }
+    if code_only {
+        // Only include Function and Class types
+        filters.push(format!(
+            r#"FILTER(?type IN (<{P}Function>, <{P}Class>))"#
+        ));
+        // Exclude common non-source directories
+        for dir in &["/docs/", "/doc/", "/images/", "/stories/", "/__tests__/",
+                     "/test/", "/tests/", "/spec/", "/fixtures/", "/examples/",
+                     "/__mocks__/", "/__snapshots__/", "/coverage/", "/dist/",
+                     "/build/", "/node_modules/", "/.storybook/"] {
+            filters.push(format!(
+                r#"FILTER(!CONTAINS(STR(?subject), "{dir}"))"#
+            ));
+        }
+    }
+    // User-specified directory exclusions
+    for dir in exclude {
+        filters.push(format!(
+            r#"FILTER(!CONTAINS(STR(?subject), "/{dir}/"))"#
+        ));
+    }
+    let filter_clause = filters.join("\n            ");
     let structs_sparql = format!(
         r#"SELECT ?subject ?type WHERE {{
             ?subject <{P}a> ?type .
-            {filter}
+            {filter_clause}
         }} ORDER BY ?subject"#
     );
-    let structs = store
-        .query_to_json(&structs_sparql)
-        .map_err(|e| e.to_string())?;
+    let structs = store.query_to_json(&structs_sparql).map_err(|e| e.to_string())?;
 
     // 2. Query call relationships
     let calls_sparql = format!(
-        r#"SELECT ?caller ?callee WHERE {{
-            ?caller <{P}calls> ?callee .
-        }}"#
+        r#"SELECT ?caller ?callee WHERE {{ ?caller <{P}calls> ?callee . }}"#
     );
-    let calls = store
-        .query_to_json(&calls_sparql)
-        .map_err(|e| e.to_string())?;
+    let calls = store.query_to_json(&calls_sparql).map_err(|e| e.to_string())?;
 
     // 3. Query dependencies
     let deps_sparql = format!(
-        r#"SELECT ?file ?dep WHERE {{
-            ?file <{P}dependsOn> ?dep .
-        }}"#
+        r#"SELECT ?file ?dep WHERE {{ ?file <{P}dependsOn> ?dep . }}"#
     );
-    let deps = store
-        .query_to_json(&deps_sparql)
-        .map_err(|e| e.to_string())?;
+    let deps = store.query_to_json(&deps_sparql).map_err(|e| e.to_string())?;
 
     // 4. Parse structures into a directory tree
-    // dir -> file -> [(name, kind)]
     struct FileEntry {
         symbols: Vec<(String, String)>, // (name, kind: "func" | "cls")
     }
     let mut dirs: BTreeMap<String, BTreeMap<String, FileEntry>> = BTreeMap::new();
+    // Maps raw subject path → dot-separated LikeC4 ID
+    let mut id_map: BTreeMap<String, String> = BTreeMap::new();
+    // Maps short symbol name → list of full dot IDs (for callee resolution)
+    let mut callee_index: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut element_count = 0;
 
     let rows = structs.as_array().map_or(&[] as &[Value], |v| v.as_slice());
@@ -504,14 +546,14 @@ pub fn generate_diagram(
         let subject = strip_iri(row.get("subject").and_then(|v| v.as_str()).unwrap_or(""));
         let kind_iri = strip_iri(row.get("type").and_then(|v| v.as_str()).unwrap_or(""));
 
-        // Determine the kind category
         let kind = match kind_iri {
             "Function" => "func",
             "Class" => "cls",
             "Config" | "Document" | "Stylesheet" | "Binary" => {
-                // File-level types — add as a file with no children
+                if code_only {
+                    continue;
+                }
                 if depth < 2 {
-                    // At depth 1, just track the directory
                     if let Some(dir) = subject.rsplit('/').nth(1).or(Some(".")) {
                         dirs.entry(dir.to_string()).or_default();
                     }
@@ -519,6 +561,10 @@ pub fn generate_diagram(
                     continue;
                 }
                 let (dir, file) = split_path(subject);
+                let dir_id = to_id(&dir);
+                let file_id = to_id(file);
+                let full_id = format!("{dir_id}.{file_id}");
+                id_map.insert(subject.to_string(), full_id);
                 dirs.entry(dir)
                     .or_default()
                     .entry(file.to_string())
@@ -526,7 +572,7 @@ pub fn generate_diagram(
                 element_count += 1;
                 continue;
             }
-            _ => continue, // Skip Section, Style, Element, etc.
+            _ => continue,
         };
 
         // subject is like "path/to/file.rs/func_name"
@@ -538,11 +584,18 @@ pub fn generate_diagram(
         let file_path = parts[1];
         let (dir, file) = split_path(file_path);
 
+        let dir_id = to_id(&dir);
+
         if depth < 2 {
-            dirs.entry(dir).or_default();
+            dirs.entry(dir.clone()).or_default();
+            // At depth 1, map to directory level
+            id_map.insert(subject.to_string(), dir_id.clone());
             element_count += 1;
             continue;
         }
+
+        let file_id = to_id(file);
+        let full_file_id = format!("{dir_id}.{file_id}");
 
         let file_entry = dirs
             .entry(dir)
@@ -551,9 +604,21 @@ pub fn generate_diagram(
             .or_insert_with(|| FileEntry { symbols: vec![] });
 
         if depth >= 3 {
-            file_entry
-                .symbols
-                .push((symbol_name.to_string(), kind.to_string()));
+            let sym_id = to_id(symbol_name);
+            let full_sym_id = format!("{full_file_id}.{sym_id}");
+            id_map.insert(subject.to_string(), full_sym_id.clone());
+            callee_index
+                .entry(symbol_name.to_string())
+                .or_default()
+                .push(full_sym_id);
+            file_entry.symbols.push((symbol_name.to_string(), kind.to_string()));
+        } else {
+            // At depth 2, map symbols to their file
+            id_map.insert(subject.to_string(), full_file_id.clone());
+            callee_index
+                .entry(symbol_name.to_string())
+                .or_default()
+                .push(full_file_id.clone());
         }
         element_count += 1;
     }
@@ -563,7 +628,9 @@ pub fn generate_diagram(
 
     // Specification
     writeln!(out, "specification {{").unwrap();
-    writeln!(out, "  element module").unwrap();
+    writeln!(out, "  element module {{").unwrap();
+    writeln!(out, "    style {{ shape rectangle }}").unwrap();
+    writeln!(out, "  }}").unwrap();
     if depth >= 2 {
         writeln!(out, "  element file").unwrap();
     }
@@ -571,37 +638,63 @@ pub fn generate_diagram(
         writeln!(out, "  element func").unwrap();
         writeln!(out, "  element cls").unwrap();
     }
+    writeln!(out, "  element external {{").unwrap();
+    writeln!(out, "    style {{ color muted }}").unwrap();
+    writeln!(out, "  }}").unwrap();
     writeln!(out, "  relationship calls").unwrap();
+    writeln!(out, "  relationship dependsOn").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
     // Model
     writeln!(out, "model {{").unwrap();
 
-    // Track full IDs for relationship mapping
-    let mut known_ids: BTreeSet<String> = BTreeSet::new();
+    let mut top_level_dirs: Vec<String> = Vec::new();
 
     for (dir, files) in &dirs {
         let dir_id = to_id(dir);
-        known_ids.insert(dir_id.clone());
+        top_level_dirs.push(dir_id.clone());
+        let file_count = files.len();
+        let func_count: usize = files.values().map(|f| f.symbols.len()).sum();
+
         writeln!(out, "  module {} '{}' {{", dir_id, dir).unwrap();
+        writeln!(
+            out,
+            "    description '{} files, {} symbols'",
+            file_count, func_count
+        )
+        .unwrap();
 
         if depth >= 2 {
             for (file, entry) in files {
                 let file_id = to_id(file);
-                let full_file_id = format!("{}.{}", dir_id, file_id);
-                known_ids.insert(full_file_id.clone());
                 if depth >= 3 && !entry.symbols.is_empty() {
-                    writeln!(out, "    file {} '{}' {{", file_id, file).unwrap();
-                    for (sym_name, sym_kind) in &entry.symbols {
-                        let sym_id = to_id(sym_name);
-                        let full_sym_id = format!("{}.{}", full_file_id, sym_id);
-                        known_ids.insert(full_sym_id);
-                        writeln!(out, "      {} {} '{}'", sym_kind, sym_id, sym_name).unwrap();
+                    write!(out, "    file {} '{}'", file_id, file).unwrap();
+                    if let Some(tech) = tech_from_ext(file) {
+                        writeln!(out, " {{").unwrap();
+                        writeln!(out, "      technology '{}'", tech).unwrap();
+                        for (sym_name, sym_kind) in &entry.symbols {
+                            let sym_id = to_id(sym_name);
+                            writeln!(out, "      {} {} '{}'", sym_kind, sym_id, sym_name).unwrap();
+                        }
+                        writeln!(out, "    }}").unwrap();
+                    } else {
+                        writeln!(out, " {{").unwrap();
+                        for (sym_name, sym_kind) in &entry.symbols {
+                            let sym_id = to_id(sym_name);
+                            writeln!(out, "      {} {} '{}'", sym_kind, sym_id, sym_name).unwrap();
+                        }
+                        writeln!(out, "    }}").unwrap();
                     }
-                    writeln!(out, "    }}").unwrap();
                 } else {
-                    writeln!(out, "    file {} '{}'", file_id, file).unwrap();
+                    write!(out, "    file {} '{}'", file_id, file).unwrap();
+                    if let Some(tech) = tech_from_ext(file) {
+                        writeln!(out, " {{").unwrap();
+                        writeln!(out, "      technology '{}'", tech).unwrap();
+                        writeln!(out, "    }}").unwrap();
+                    } else {
+                        writeln!(out).unwrap();
+                    }
                 }
             }
         }
@@ -609,42 +702,77 @@ pub fn generate_diagram(
         writeln!(out, "  }}").unwrap();
     }
 
+    // External dependencies as top-level elements
+    let mut external_ids: BTreeSet<String> = BTreeSet::new();
+    let dep_rows = deps.as_array().map_or(&[] as &[Value], |v| v.as_slice());
+    for row in dep_rows {
+        let dep = strip_iri(row.get("dep").and_then(|v| v.as_str()).unwrap_or(""));
+        if !dep.is_empty() {
+            let dep_id = to_id(dep);
+            if external_ids.insert(dep_id.clone()) {
+                writeln!(out, "  external {} '{}'", dep_id, dep).unwrap();
+            }
+        }
+    }
+
+    writeln!(out).unwrap();
+
     // Relationships — calls
     let call_rows = calls.as_array().map_or(&[] as &[Value], |v| v.as_slice());
     let mut rel_count = 0;
+    let mut emitted_rels: BTreeSet<(String, String)> = BTreeSet::new();
+
     for row in call_rows {
         if rel_count >= limit {
             break;
         }
-        let caller = strip_iri(row.get("caller").and_then(|v| v.as_str()).unwrap_or(""));
-        let callee = strip_iri(row.get("callee").and_then(|v| v.as_str()).unwrap_or(""));
+        let caller_raw = strip_iri(row.get("caller").and_then(|v| v.as_str()).unwrap_or(""));
+        let callee_raw = strip_iri(row.get("callee").and_then(|v| v.as_str()).unwrap_or(""));
 
-        let caller_id = to_id(caller);
-        let callee_short = to_id(callee);
+        // Look up caller in id_map
+        let caller_id = match id_map.get(caller_raw) {
+            Some(id) => id.clone(),
+            None => continue,
+        };
 
-        // Only emit if both sides are known elements
-        if known_ids.contains(&caller_id) {
-            // Find callee by short name match
-            if let Some(callee_full) = known_ids.iter().find(|id| id.ends_with(&callee_short)) {
-                writeln!(out, "  {} -> {} 'calls'", caller_id, callee_full).unwrap();
+        // Look up callee by short name in callee_index
+        let callee_ids = match callee_index.get(callee_raw) {
+            Some(ids) => ids.clone(),
+            None => continue,
+        };
+
+        for callee_id in callee_ids {
+            if caller_id == callee_id {
+                continue; // skip self-calls
+            }
+            let rel_key = (caller_id.clone(), callee_id.clone());
+            if emitted_rels.insert(rel_key) {
+                writeln!(out, "  {} -[calls]-> {} 'calls'", caller_id, callee_id).unwrap();
                 rel_count += 1;
+                if rel_count >= limit {
+                    break;
+                }
             }
         }
     }
 
     // Relationships — dependencies
-    let dep_rows = deps.as_array().map_or(&[] as &[Value], |v| v.as_slice());
     for row in dep_rows {
         if rel_count >= limit {
             break;
         }
-        let file = strip_iri(row.get("file").and_then(|v| v.as_str()).unwrap_or(""));
+        let file_raw = strip_iri(row.get("file").and_then(|v| v.as_str()).unwrap_or(""));
         let dep = strip_iri(row.get("dep").and_then(|v| v.as_str()).unwrap_or(""));
 
-        let file_id = to_id(file);
-        if known_ids.contains(&file_id) {
-            // Dependencies are external — just reference by name
-            writeln!(out, "  // {} depends on {}", file, dep).unwrap();
+        let file_id = match id_map.get(file_raw) {
+            Some(id) => id.clone(),
+            None => continue,
+        };
+        let dep_id = to_id(dep);
+
+        let rel_key = (file_id.clone(), dep_id.clone());
+        if emitted_rels.insert(rel_key) {
+            writeln!(out, "  {} -[dependsOn]-> {} 'depends on'", file_id, dep_id).unwrap();
             rel_count += 1;
         }
     }
@@ -658,6 +786,14 @@ pub fn generate_diagram(
     writeln!(out, "    title 'Codebase Architecture'").unwrap();
     writeln!(out, "    include *").unwrap();
     writeln!(out, "  }}").unwrap();
+
+    // Scoped views per top-level directory
+    for dir_id in &top_level_dirs {
+        writeln!(out, "  view of {} {{", dir_id).unwrap();
+        writeln!(out, "    include *").unwrap();
+        writeln!(out, "  }}").unwrap();
+    }
+
     writeln!(out, "}}").unwrap();
 
     Ok(out)
@@ -667,7 +803,6 @@ fn split_path(path: &str) -> (String, &str) {
     if let Some(pos) = path.rfind('/') {
         let dir = &path[..pos];
         let file = &path[pos + 1..];
-        // Collapse directory to last 2 segments for readability
         let dir_short = dir
             .rsplit('/')
             .take(2)

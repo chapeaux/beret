@@ -249,14 +249,17 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
         ),
         tool(
             "generate_diagram", "Generate Diagram",
-            "Generate a LikeC4 architecture diagram from the indexed codebase. \
-             Returns LikeC4 DSL text that can be pasted into playground.likec4.dev, \
-             saved as a .c4 file, or rendered with `npx likec4`. \
-             Use depth to control detail level: 1=directories, 2=+files, 3=+functions/classes.",
+            "Generate an interconnected LikeC4 architecture diagram showing functions, \
+             classes, and their call relationships. By default shows code structures at \
+             full depth with call graph connections. Set code_only to false to include \
+             configs, docs, and assets. Output can be pasted into playground.likec4.dev \
+             or saved as a .c4 file.",
             &[
-                ("path", "string", "Focus on a subdirectory (default: entire codebase)"),
-                ("depth", "integer", "Nesting depth: 1=directories, 2=+files, 3=+functions/classes (default: 2)"),
-                ("limit", "integer", "Maximum number of elements to include (default: 200)"),
+                ("path", "string", "Focus on a subdirectory or module"),
+                ("depth", "integer", "1=directories, 2=+files, 3=+functions/classes (default: 3)"),
+                ("code_only", "boolean", "Exclude non-code types and non-source directories like docs, tests, stories, images, dist (default: true)"),
+                ("exclude", "string", "Comma-separated directory names to exclude (e.g., 'stories,examples,demo')"),
+                ("limit", "integer", "Maximum elements to include (default: 500)"),
             ],
             &[],
         ),
@@ -592,9 +595,18 @@ impl ServerHandler for BeretHandler {
                     .and_then(|args| args.get("depth"))
                     .and_then(|v| v.as_u64())
                     .map(|n| n as usize)
-                    .unwrap_or(2);
-                let limit = Self::get_limit(&params, 200);
-                tools::generate_diagram(&self.store, path, depth, limit)
+                    .unwrap_or(3);
+                let code_only = params
+                    .arguments
+                    .as_ref()
+                    .and_then(|args| args.get("code_only"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let exclude: Vec<String> = Self::get_arg(&params, "exclude")
+                    .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
+                    .unwrap_or_default();
+                let limit = Self::get_limit(&params, 500);
+                tools::generate_diagram(&self.store, path, depth, code_only, &exclude, limit)
                     .map_or_else(|e| Err(Self::err(e)), Self::ok_text)
             }
 
