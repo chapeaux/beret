@@ -298,7 +298,7 @@ fn non_code_kind(ext: &str, file_name: &str) -> Option<NonCodeKind> {
 fn iri_safe(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_alphanumeric() || "-._~:@!$&'()*+,;=/".contains(c) || c > '\x7F' {
+            if c.is_ascii_alphanumeric() || "-._~:@!$&'()*+,;=/".contains(c) {
                 c
             } else {
                 '_'
@@ -698,10 +698,18 @@ pub fn ingest(root: &Path, store: &CodebaseStore) -> Result<usize, Box<dyn std::
         });
 
     let triples = all_triples.into_inner().unwrap();
-    let count = triples.len();
+    let mut count = 0;
+    let mut skipped = 0;
 
     for triple in &triples {
-        store.insert_triple(&triple.subject, &triple.predicate, &triple.object)?;
+        match store.insert_triple(&triple.subject, &triple.predicate, &triple.object) {
+            Ok(()) => count += 1,
+            Err(_) => skipped += 1,
+        }
+    }
+
+    if skipped > 0 {
+        eprintln!("Beret: skipped {} triples with invalid IRIs", skipped);
     }
 
     Ok(count)
