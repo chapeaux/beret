@@ -24,27 +24,54 @@ use crate::store::CodebaseStore;
 enum Mode {
     Stdio { root: PathBuf },
     Http { host: String, port: u16 },
+    Cli { root: PathBuf, command: CliCommand },
+}
+
+enum CliCommand {
+    Describe,
+    Activity,
+    Testing,
+    Architecture,
+    Dependencies,
+    Practices,
+    Stats,
+    Query { sparql: String },
+    Find { name: String },
+    Diagram,
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: beret [OPTIONS] [PATH]
+        "Usage: beret [OPTIONS] [COMMAND] [PATH]
 
-MCP server that builds a SPARQL-queryable knowledge graph of your codebase.
+MCP server and CLI that builds a SPARQL-queryable knowledge graph of your codebase.
 
-Arguments:
-  [PATH]    Directory to index (defaults to current directory)
+Commands:
+  describe [PATH]         Consolidated project analysis (default command)
+  activity [PATH]         Git activity: contributors, active files, recent commits
+  testing [PATH]          Test frameworks, test ratio, test dependencies
+  architecture [PATH]     Layers, structure counts, monorepo detection
+  dependencies [PATH]     Package managers, dependency count
+  practices [PATH]        All detected engineering practices
+  stats [PATH]            Counts by structure type
+  query SPARQL [PATH]     Run a raw SPARQL query
+  find NAME [PATH]        Find symbols by name
+  diagram [PATH]          Generate LikeC4 architecture diagram
 
 Options:
-  --serve [HOST:]PORT   Start HTTP/SSE server instead of stdio
+  --serve [HOST:]PORT   Start HTTP/SSE server (MCP over SSE)
   --help                Show this help message
   --version             Show version
 
+MCP mode (no command):
+  beret [PATH]            Start MCP server over stdio
+
 Examples:
-  beret                           # stdio, index cwd
-  beret /path/to/project          # stdio, index given path
-  beret --serve 8080              # HTTP on 127.0.0.1:8080
-  beret --serve 0.0.0.0:9090      # HTTP on all interfaces, port 9090"
+  beret describe                  # analyze current directory
+  beret activity /path/to/repo    # git activity for a repo
+  beret find main                 # find symbols named 'main'
+  beret query 'SELECT ?s WHERE {{ ?s <http://repo.example.org/a> <http://repo.example.org/Function> }}'
+  beret --serve 8080              # HTTP/SSE MCP server on port 8080"
     );
 }
 
@@ -75,6 +102,41 @@ fn parse_args() -> std::result::Result<Mode, Box<dyn std::error::Error>> {
                 };
                 return Ok(Mode::Http { host, port });
             }
+            // CLI subcommands
+            "describe" | "activity" | "testing" | "architecture" | "dependencies"
+            | "practices" | "stats" | "diagram" => {
+                let command = match args[i].as_str() {
+                    "describe" => CliCommand::Describe,
+                    "activity" => CliCommand::Activity,
+                    "testing" => CliCommand::Testing,
+                    "architecture" => CliCommand::Architecture,
+                    "dependencies" => CliCommand::Dependencies,
+                    "practices" => CliCommand::Practices,
+                    "stats" => CliCommand::Stats,
+                    "diagram" => CliCommand::Diagram,
+                    _ => unreachable!(),
+                };
+                let root = args.get(i + 1)
+                    .map(PathBuf::from)
+                    .unwrap_or(std::env::current_dir()?);
+                return Ok(Mode::Cli { root, command });
+            }
+            "query" => {
+                i += 1;
+                let sparql = args.get(i).ok_or("query requires a SPARQL string")?.clone();
+                let root = args.get(i + 1)
+                    .map(PathBuf::from)
+                    .unwrap_or(std::env::current_dir()?);
+                return Ok(Mode::Cli { root, command: CliCommand::Query { sparql } });
+            }
+            "find" => {
+                i += 1;
+                let name = args.get(i).ok_or("find requires a symbol name")?.clone();
+                let root = args.get(i + 1)
+                    .map(PathBuf::from)
+                    .unwrap_or(std::env::current_dir()?);
+                return Ok(Mode::Cli { root, command: CliCommand::Find { name } });
+            }
             arg if arg.starts_with('-') => {
                 return Err(format!("unknown option: {arg}").into());
             }
@@ -89,6 +151,29 @@ fn parse_args() -> std::result::Result<Mode, Box<dyn std::error::Error>> {
     Ok(Mode::Stdio {
         root: std::env::current_dir()?,
     })
+}
+
+// --- IRI prefix stripping (shared by MCP handler and CLI) ---
+
+fn strip_iri_prefixes(value: Value) -> Value {
+    const PREFIX: &str = "<http://repo.example.org/";
+    match value {
+        Value::String(s) => {
+            let stripped = s
+                .strip_prefix(PREFIX)
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or(&s)
+                .to_string();
+            Value::String(stripped)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(strip_iri_prefixes).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, strip_iri_prefixes(v)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 // --- Tool definitions ---
@@ -381,30 +466,8 @@ impl BeretHandler {
         })
     }
 
-    /// Strip `<http://repo.example.org/>` prefix and angle brackets from all string values.
-    fn strip_iri_prefixes(value: Value) -> Value {
-        const PREFIX: &str = "<http://repo.example.org/";
-        match value {
-            Value::String(s) => {
-                let stripped = s
-                    .strip_prefix(PREFIX)
-                    .and_then(|s| s.strip_suffix('>'))
-                    .unwrap_or(&s)
-                    .to_string();
-                Value::String(stripped)
-            }
-            Value::Array(arr) => Value::Array(arr.into_iter().map(Self::strip_iri_prefixes).collect()),
-            Value::Object(map) => Value::Object(
-                map.into_iter()
-                    .map(|(k, v)| (k, Self::strip_iri_prefixes(v)))
-                    .collect(),
-            ),
-            other => other,
-        }
-    }
-
     fn ok_json(value: Value) -> std::result::Result<CallToolResult, CallToolError> {
-        let value = Self::strip_iri_prefixes(value);
+        let value = strip_iri_prefixes(value);
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
         Ok(CallToolResult::text_content(vec![TextContent::new(
             text, None, None,
@@ -459,7 +522,7 @@ impl BeretHandler {
                     .into_iter()
                     .skip(offset)
                     .take(limit)
-                    .map(Self::strip_iri_prefixes)
+                    .map(strip_iri_prefixes)
                     .collect();
                 let count = returned.len();
                 let has_more = offset + count < total;
@@ -773,6 +836,45 @@ fn make_server_details() -> InitializeResult {
     }
 }
 
+fn run_cli(root: PathBuf, command: CliCommand) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let store = CodebaseStore::new()?;
+    let root = std::fs::canonicalize(&root)?;
+
+    eprintln!("Indexing {}...", root.display());
+    let count = ingest(&root, &store)?;
+    eprintln!("Indexed {} triples.", count);
+
+    let result: std::result::Result<Value, String> = match command {
+        CliCommand::Describe => tools::describe_project(&store),
+        CliCommand::Activity => tools::describe_activity(&store),
+        CliCommand::Testing => tools::describe_testing(&store),
+        CliCommand::Architecture => tools::describe_architecture(&store),
+        CliCommand::Dependencies => tools::describe_dependencies(&store),
+        CliCommand::Practices => tools::describe_practices(&store),
+        CliCommand::Stats => tools::file_stats(&store, &[]),
+        CliCommand::Query { ref sparql } => store.query_to_json(sparql).map_err(|e| e.to_string()),
+        CliCommand::Find { ref name } => tools::find_symbol(&store, name, &[]),
+        CliCommand::Diagram => {
+            tools::generate_diagram(&store, None, 0, true, &[], 500)
+                .map(Value::String)
+        }
+    };
+
+    match result {
+        Ok(value) => {
+            let value = strip_iri_prefixes(value);
+            let output = serde_json::to_string_pretty(&value)?;
+            println!("{output}");
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
 async fn run_stdio(root: PathBuf) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(CodebaseStore::new()?);
 
@@ -838,5 +940,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     match parse_args()? {
         Mode::Stdio { root } => run_stdio(root).await,
         Mode::Http { host, port } => run_http(host, port).await,
+        Mode::Cli { root, command } => run_cli(root, command),
     }
 }

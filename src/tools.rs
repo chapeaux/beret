@@ -259,6 +259,14 @@ fn query_practice_values(store: &CodebaseStore, predicate: &str) -> Result<Vec<S
         .collect())
 }
 
+/// Parse a SPARQL integer result like `"22"^^<http://www.w3.org/2001/XMLSchema#integer>`.
+fn parse_sparql_count(s: &str) -> usize {
+    // Strip leading quote, take digits before any trailing quote or ^^
+    let s = s.strip_prefix('"').unwrap_or(s);
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    s[..end].parse().unwrap_or(0)
+}
+
 /// Helper: count structures of a given type, optionally filtered by path.
 fn count_type(store: &CodebaseStore, kind: &str, path_filter: Option<&str>) -> Result<usize, String> {
     let mut filter = String::new();
@@ -277,7 +285,7 @@ fn count_type(store: &CodebaseStore, kind: &str, path_filter: Option<&str>) -> R
         .and_then(|a| a.first())
         .and_then(|r| r.get("count"))
         .and_then(|v| v.as_str())
-        .and_then(|s| s.trim_matches('"').parse::<usize>().ok())
+        .map(parse_sparql_count)
         .unwrap_or(0))
 }
 
@@ -318,7 +326,7 @@ fn count_test_functions(store: &CodebaseStore) -> Result<usize, String> {
         .and_then(|a| a.first())
         .and_then(|r| r.get("count"))
         .and_then(|v| v.as_str())
-        .and_then(|s| s.trim_matches('"').parse::<usize>().ok())
+        .map(parse_sparql_count)
         .unwrap_or(0))
 }
 
@@ -484,7 +492,7 @@ pub fn describe_dependencies(store: &CodebaseStore) -> Result<Value, String> {
         .and_then(|a| a.first())
         .and_then(|r| r.get("count"))
         .and_then(|v| v.as_str())
-        .and_then(|s| s.trim_matches('"').parse::<usize>().ok())
+        .map(parse_sparql_count)
         .unwrap_or(0);
 
     let mut result = Map::new();
@@ -522,14 +530,10 @@ pub fn describe_activity(store: &CodebaseStore) -> Result<Value, String> {
             .strip_prefix(&format!("<{P}"))
             .and_then(|s| s.strip_suffix('>'))
             .unwrap_or(author);
-        let commits_clean = commits
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .unwrap_or(commits);
         let mut entry = Map::new();
         entry.insert("name".into(), Value::String(author_clean.to_string()));
         entry.insert("commits".into(), Value::Number(
-            commits_clean.parse::<u64>().unwrap_or(0).into()
+            (parse_sparql_count(commits) as u64).into()
         ));
         contributors.push(Value::Object(entry));
     }
@@ -550,12 +554,11 @@ pub fn describe_activity(store: &CodebaseStore) -> Result<Value, String> {
             .strip_prefix(&format!("<{P}"))
             .and_then(|s| s.strip_suffix('>'))
             .unwrap_or(file);
-        let count_clean = count
+        let count_raw = count
             .strip_prefix(&format!("<{P}"))
             .and_then(|s| s.strip_suffix('>'))
-            .unwrap_or(count)
-            .trim_matches('"');
-        active_files.push((file_clean.to_string(), count_clean.parse().unwrap_or(0)));
+            .unwrap_or(count);
+        active_files.push((file_clean.to_string(), parse_sparql_count(count_raw)));
     }
     active_files.sort_by(|a, b| b.1.cmp(&a.1));
     active_files.truncate(20);
@@ -1068,7 +1071,7 @@ pub fn generate_diagram(
         );
         let count = store.query_to_json(&count_sparql)
             .ok()
-            .and_then(|v| v.as_array()?.first()?.get("count")?.as_str()?.trim_matches('"').parse::<usize>().ok())
+            .and_then(|v| v.as_array()?.first()?.get("count")?.as_str().map(parse_sparql_count))
             .unwrap_or(0);
         if count <= 100 { 3 }       // Small: show everything
         else if count <= 500 { 2 }  // Medium: files only
