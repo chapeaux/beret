@@ -194,6 +194,10 @@ pub fn describe_practices(store: &CodebaseStore) -> Result<Value, String> {
         ("architecture_layers", "hasLayer"),
         ("documentation", "hasDocumentation"),
         ("conventions", "followsConvention"),
+        ("deployment_platforms", "usesDeploymentPlatform"),
+        ("code_analysis", "usesCodeAnalysis"),
+        ("packaging_formats", "usesPackagingFormat"),
+        ("config_management", "usesConfigManagement"),
     ];
 
     let mut result = Map::new();
@@ -279,6 +283,7 @@ fn count_type(store: &CodebaseStore, kind: &str, path_filter: Option<&str>) -> R
 
 pub fn describe_testing(store: &CodebaseStore) -> Result<Value, String> {
     let frameworks = query_practice_values(store, "usesTestFramework")?;
+    let test_deps = detect_test_deps_from_graph(store)?;
     let total_functions = count_type(store, "Function", None)?;
     let test_functions = count_type(store, "Function", Some("test"))?;
     let spec_functions = count_type(store, "Function", Some("spec"))?;
@@ -286,6 +291,9 @@ pub fn describe_testing(store: &CodebaseStore) -> Result<Value, String> {
 
     let mut result = Map::new();
     result.insert("frameworks".into(), Value::Array(frameworks.into_iter().map(Value::String).collect()));
+    if !test_deps.is_empty() {
+        result.insert("test_dependencies".into(), Value::Array(test_deps.into_iter().map(Value::String).collect()));
+    }
     result.insert("total_functions".into(), Value::Number(total_functions.into()));
     result.insert("test_functions".into(), Value::Number(test_related.into()));
     if total_functions > 0 {
@@ -295,10 +303,74 @@ pub fn describe_testing(store: &CodebaseStore) -> Result<Value, String> {
     Ok(Value::Object(result))
 }
 
+/// Detect test framework dependencies from the `dependsOn` graph.
+fn detect_test_deps_from_graph(store: &CodebaseStore) -> Result<Vec<String>, String> {
+    let sparql = format!(
+        r#"SELECT DISTINCT ?dep WHERE {{
+            ?file <{P}dependsOn> ?dep .
+        }}"#
+    );
+    let rows = store.query_to_json(&sparql).map_err(|e| e.to_string())?;
+
+    const TEST_PATTERNS: &[(&str, &str)] = &[
+        // Java/JVM
+        ("testng", "testng"),
+        ("junit-jupiter", "junit"),
+        (":junit", "junit"),
+        ("mockito", "mockito"),
+        ("assertj", "assertj"),
+        ("hamcrest", "hamcrest"),
+        ("cucumber", "cucumber"),
+        ("rest-assured", "rest-assured"),
+        ("selenium", "selenium"),
+        ("arquillian", "arquillian"),
+        ("spock", "spock"),
+        // JavaScript/TypeScript
+        (":jest", "jest"),
+        (":vitest", "vitest"),
+        (":mocha", "mocha"),
+        (":cypress", "cypress"),
+        (":playwright", "playwright"),
+        // Python
+        ("pytest", "pytest"),
+        // Ruby
+        ("rspec", "rspec"),
+        ("minitest", "minitest"),
+        // Go
+        ("testify", "testify"),
+        ("ginkgo", "ginkgo"),
+        ("gomega", "gomega"),
+    ];
+
+    let mut found: Vec<String> = Vec::new();
+    let empty = vec![];
+    let dep_rows = rows.as_array().unwrap_or(&empty);
+
+    for row in dep_rows {
+        let dep = row
+            .get("dep")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let dep_clean = dep
+            .strip_prefix(&format!("<{P}"))
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(dep)
+            .to_lowercase();
+
+        for &(pattern, label) in TEST_PATTERNS {
+            if dep_clean.contains(pattern) && !found.contains(&label.to_string()) {
+                found.push(label.to_string());
+            }
+        }
+    }
+    Ok(found)
+}
+
 pub fn describe_ci_cd(store: &CodebaseStore) -> Result<Value, String> {
     let platforms = query_practice_values(store, "usesCIPlatform")?;
     let containerization = query_practice_values(store, "usesContainerization")?;
     let build_tools = query_practice_values(store, "usesBuildTool")?;
+    let deployment_platforms = query_practice_values(store, "usesDeploymentPlatform")?;
     let has_infra = query_practice_values(store, "hasLayer")?
         .iter()
         .any(|l| l == "infrastructure");
@@ -307,6 +379,9 @@ pub fn describe_ci_cd(store: &CodebaseStore) -> Result<Value, String> {
     result.insert("ci_platforms".into(), Value::Array(platforms.into_iter().map(Value::String).collect()));
     result.insert("containerization".into(), Value::Array(containerization.into_iter().map(Value::String).collect()));
     result.insert("build_tools".into(), Value::Array(build_tools.into_iter().map(Value::String).collect()));
+    if !deployment_platforms.is_empty() {
+        result.insert("deployment_platforms".into(), Value::Array(deployment_platforms.into_iter().map(Value::String).collect()));
+    }
     result.insert("has_infrastructure_as_code".into(), Value::Bool(has_infra));
     Ok(Value::Object(result))
 }
@@ -316,12 +391,16 @@ pub fn describe_code_quality(store: &CodebaseStore) -> Result<Value, String> {
     let formatters = query_practice_values(store, "usesFormatter")?;
     let type_checkers = query_practice_values(store, "usesTypeChecking")?;
     let conventions = query_practice_values(store, "followsConvention")?;
+    let code_analysis = query_practice_values(store, "usesCodeAnalysis")?;
 
     let mut result = Map::new();
     result.insert("linters".into(), Value::Array(linters.into_iter().map(Value::String).collect()));
     result.insert("formatters".into(), Value::Array(formatters.into_iter().map(Value::String).collect()));
     result.insert("type_checkers".into(), Value::Array(type_checkers.into_iter().map(Value::String).collect()));
     result.insert("conventions".into(), Value::Array(conventions.into_iter().map(Value::String).collect()));
+    if !code_analysis.is_empty() {
+        result.insert("code_analysis".into(), Value::Array(code_analysis.into_iter().map(Value::String).collect()));
+    }
     Ok(Value::Object(result))
 }
 
@@ -394,6 +473,267 @@ pub fn describe_dependencies(store: &CodebaseStore) -> Result<Value, String> {
     result.insert("declared_dependencies".into(), Value::Number(dep_count.into()));
     result.insert("has_automated_updates".into(), Value::Bool(has_auto_updates));
     Ok(Value::Object(result))
+}
+
+// --- Unified project description ---
+
+pub fn describe_project(store: &CodebaseStore) -> Result<Value, String> {
+    let mut result = Map::new();
+
+    result.insert("practices".into(), describe_practices(store)?);
+    result.insert("testing".into(), describe_testing(store)?);
+    result.insert("ci_cd".into(), describe_ci_cd(store)?);
+    result.insert("code_quality".into(), describe_code_quality(store)?);
+    result.insert("architecture".into(), describe_architecture(store)?);
+    result.insert("documentation".into(), describe_documentation(store)?);
+    result.insert("dependencies".into(), describe_dependencies(store)?);
+
+    let insights = generate_insights(&result);
+    if !insights.is_empty() {
+        result.insert(
+            "insights".into(),
+            Value::Array(insights.into_iter().map(Value::String).collect()),
+        );
+    }
+
+    Ok(Value::Object(result))
+}
+
+fn generate_insights(data: &Map<String, Value>) -> Vec<String> {
+    let mut insights = Vec::new();
+
+    let has_val = |section: &str, key: &str, needle: &str| -> bool {
+        data.get(section)
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_array())
+            .map_or(false, |arr| {
+                arr.iter()
+                    .any(|v| v.as_str().map_or(false, |s| s.contains(needle)))
+            })
+    };
+    let get_num = |section: &str, key: &str| -> Option<u64> {
+        data.get(section)
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_u64())
+    };
+    let get_bool = |section: &str, key: &str| -> bool {
+        data.get(section)
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    let arr_len = |section: &str, key: &str| -> usize {
+        data.get(section)
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_array())
+            .map_or(0, |a| a.len())
+    };
+    let arr_vals = |section: &str, key: &str| -> Vec<String> {
+        data.get(section)
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_array())
+            .map_or(vec![], |arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+    };
+
+    // Dogfooding: devfile + containerization
+    if has_val("code_quality", "conventions", "devfile") {
+        if has_val("ci_cd", "containerization", "docker") {
+            insights.push(
+                "Uses devfile.yaml with containerized builds — the team dogfoods \
+                 their own development environment."
+                    .into(),
+            );
+        } else {
+            insights.push(
+                "Uses devfile.yaml — standardized, reproducible development environment.".into(),
+            );
+        }
+    }
+
+    // Testing maturity
+    let fw_count = arr_len("testing", "frameworks") + arr_len("testing", "test_dependencies");
+    let test_ratio = get_num("testing", "test_ratio_percent").unwrap_or(0);
+    if fw_count > 0 && test_ratio > 20 {
+        let all_fws: Vec<String> = arr_vals("testing", "frameworks")
+            .into_iter()
+            .chain(arr_vals("testing", "test_dependencies"))
+            .collect();
+        insights.push(format!(
+            "{}% test ratio with {} — indicates a solid testing practice.",
+            test_ratio,
+            all_fws.join(", ")
+        ));
+    } else if fw_count > 0 && test_ratio > 0 {
+        insights.push(format!(
+            "Test frameworks detected but test ratio is {}% — testing may be \
+             concentrated in specific modules.",
+            test_ratio
+        ));
+    }
+
+    // Unit + integration separation
+    if has_val("ci_cd", "build_tools", "maven-surefire")
+        && has_val("ci_cd", "build_tools", "maven-failsafe")
+    {
+        insights.push(
+            "Uses Maven Surefire + Failsafe — unit and integration tests are \
+             separated with different execution phases."
+                .into(),
+        );
+    }
+
+    // CI + containerization = deployment pipeline
+    let ci = arr_vals("ci_cd", "ci_platforms");
+    let containers = arr_vals("ci_cd", "containerization");
+    if !ci.is_empty() && !containers.is_empty() {
+        insights.push(format!(
+            "CI via {} with {} — automated build and deployment pipeline.",
+            ci.join(", "),
+            containers.join(", ")
+        ));
+    }
+
+    // Open source health
+    let doc_artifacts = arr_vals("documentation", "documentation_artifacts");
+    let health_signals: Vec<&str> = [
+        "contributing-guide",
+        "security-policy",
+        "code-of-conduct",
+        "codeowners",
+        "issue-templates",
+        "pr-template",
+    ]
+    .iter()
+    .filter(|&&s| doc_artifacts.iter().any(|d| d == s))
+    .copied()
+    .collect();
+    if health_signals.len() >= 3 {
+        insights.push(format!(
+            "Strong open-source health: {} — set up for community contributions.",
+            health_signals.join(", ")
+        ));
+    }
+
+    // Architecture maturity
+    let layers = arr_vals("architecture", "layers");
+    if layers.len() >= 5 {
+        insights.push(format!(
+            "Well-layered architecture with {} layers ({}) — mature, modular codebase.",
+            layers.len(),
+            layers.join(", ")
+        ));
+    }
+
+    // Monorepo
+    if get_bool("architecture", "is_monorepo") {
+        let pms = arr_vals("architecture", "package_managers");
+        insights.push(format!(
+            "Monorepo structure with {} — multiple packages managed together.",
+            pms.join(", ")
+        ));
+    }
+
+    // Dependency management
+    if get_bool("dependencies", "has_automated_updates") {
+        insights.push(
+            "Uses automated dependency updates (Renovate/Dependabot) — proactive \
+             about security patches."
+                .into(),
+        );
+    }
+
+    // Deployment platforms
+    let deploy = arr_vals("ci_cd", "deployment_platforms");
+    if !deploy.is_empty() {
+        insights.push(format!(
+            "Deploys to {} — cloud-native deployment target(s).",
+            deploy.join(", ")
+        ));
+    }
+
+    // Code quality tooling
+    let linter_count = arr_len("code_quality", "linters");
+    let formatter_count = arr_len("code_quality", "formatters");
+    let analysis_count = arr_len("code_quality", "code_analysis");
+    if linter_count + formatter_count + analysis_count >= 3 {
+        let linters = arr_vals("code_quality", "linters");
+        let formatters = arr_vals("code_quality", "formatters");
+        let analysis = arr_vals("code_quality", "code_analysis");
+        let all: Vec<String> = linters
+            .into_iter()
+            .chain(formatters)
+            .chain(analysis)
+            .collect();
+        insights.push(format!(
+            "Strong code quality tooling: {} — enforced code standards.",
+            all.join(", ")
+        ));
+    }
+
+    // Version pinning
+    if has_val("code_quality", "conventions", "version-pinning") {
+        insights.push(
+            "Uses version pinning (.nvmrc, .tool-versions, etc.) — reproducible \
+             builds across environments."
+                .into(),
+        );
+    }
+
+    // Linux packaging
+    let pkg_formats = arr_vals("practices", "packaging_formats");
+    if !pkg_formats.is_empty() {
+        insights.push(format!(
+            "Packages for {} — distributes via Linux package manager(s).",
+            pkg_formats.join(", ")
+        ));
+    }
+
+    // Config management
+    let config_mgmt = arr_vals("practices", "config_management");
+    if !config_mgmt.is_empty() {
+        insights.push(format!(
+            "Uses {} for infrastructure automation.",
+            config_mgmt.join(", ")
+        ));
+    }
+
+    // Red Hat / Fedora ecosystem signals
+    if has_val("ci_cd", "ci_platforms", "packit") {
+        insights.push(
+            "Uses Packit — automated Fedora/CentOS Stream package maintenance.".into(),
+        );
+    }
+    if has_val("code_quality", "conventions", "fedora-gating") {
+        insights.push("Has Fedora gating tests — packages gate on CI results.".into());
+    }
+
+    // systemd + SELinux = Linux system integration
+    if has_val("code_quality", "conventions", "systemd")
+        && has_val("code_quality", "conventions", "selinux")
+    {
+        insights.push(
+            "Includes systemd units and SELinux policy — deep Linux system integration.".into(),
+        );
+    } else if has_val("code_quality", "conventions", "systemd") {
+        insights.push("Ships systemd service units — designed for Linux system integration.".into());
+    }
+
+    // Operator pattern
+    if has_val("code_quality", "conventions", "olm-operator")
+        || has_val("code_quality", "conventions", "ansible-operator")
+    {
+        insights.push(
+            "Implements the Kubernetes Operator pattern with OLM lifecycle management.".into(),
+        );
+    }
+
+    // Cap at 12
+    insights.truncate(12);
+    insights
 }
 
 // --- Live ast-grep pattern search ---

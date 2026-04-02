@@ -276,6 +276,15 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
             &[],
         ),
         tool(
+            "describe_project", "Describe Project",
+            "Comprehensive project analysis in a single call. Combines testing, CI/CD, \
+             code quality, architecture, documentation, and dependency information. \
+             Also generates cross-cutting insights by analyzing combinations of practices \
+             (e.g., dogfooding culture, testing maturity, deployment pipeline sophistication). \
+             This is the recommended first tool for understanding a project.",
+            &[], &[],
+        ),
+        tool(
             "describe_practices", "Describe Practices",
             "High-level summary of all software engineering practices detected in the codebase. \
              For deeper analysis, use the category-specific tools: describe_testing, \
@@ -663,6 +672,11 @@ impl ServerHandler for BeretHandler {
                     .map_or_else(|e| Err(Self::err(e)), Self::ok_text)
             }
 
+            "describe_project" => {
+                tools::describe_project(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
             "describe_practices" => {
                 tools::describe_practices(&self.store)
                     .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
@@ -736,8 +750,8 @@ fn make_server_details() -> InitializeResult {
         protocol_version: ProtocolVersion::V2025_11_25.into(),
         instructions: Some(
             "Beret builds an RDF knowledge graph of a codebase. Call refresh_index with a \
-             directory path to index it first, then use the other tools to explore. \
-             Start with file_stats for an overview, find_entry_points to locate where \
+             directory path to index it first, then use describe_project for a comprehensive \
+             overview with cross-cutting insights. Use find_entry_points to locate where \
              the app starts, find_symbol to locate definitions, find_callers/find_callees \
              to trace the call graph, find_dead_code for unused functions, and \
              search_pattern for structural AST matching. Use query_codebase for raw SPARQL."

@@ -274,6 +274,9 @@ enum NonCodeKind {
     Markdown,
     Html,
     Css,
+    AsciiDoc,
+    ReStructuredText,
+    ManPage,
 }
 
 fn non_code_kind(ext: &str, file_name: &str) -> Option<NonCodeKind> {
@@ -283,6 +286,9 @@ fn non_code_kind(ext: &str, file_name: &str) -> Option<NonCodeKind> {
         "md" | "markdown" => Some(NonCodeKind::Markdown),
         "html" | "htm" => Some(NonCodeKind::Html),
         "css" => Some(NonCodeKind::Css),
+        "adoc" | "asciidoc" => Some(NonCodeKind::AsciiDoc),
+        "rst" => Some(NonCodeKind::ReStructuredText),
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => Some(NonCodeKind::ManPage),
         _ => {
             // Handle extensionless config files
             match file_name {
@@ -463,6 +469,81 @@ fn process_css_file(path: &Path, source: &str, triples: &mut Vec<Triple>) {
     }
 }
 
+fn process_asciidoc_file(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    triples.push(Triple {
+        subject: file_path.to_string(),
+        predicate: "a".into(),
+        object: "Document".into(),
+    });
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        // AsciiDoc headings: = Title, == Section, === Subsection
+        if trimmed.starts_with('=') && !trimmed.starts_with("====") {
+            let heading = trimmed.trim_start_matches('=').trim();
+            if !heading.is_empty() {
+                triples.push(Triple {
+                    subject: format!("{}/{}", file_path, iri_safe(heading)),
+                    predicate: "a".into(),
+                    object: "Section".into(),
+                });
+            }
+        }
+    }
+}
+
+fn process_rst_file(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    triples.push(Triple {
+        subject: file_path.to_string(),
+        predicate: "a".into(),
+        object: "Document".into(),
+    });
+
+    // RST headings: text line followed by underline of =, -, ~, ^, +, #
+    let lines: Vec<&str> = source.lines().collect();
+    for i in 0..lines.len().saturating_sub(1) {
+        let heading = lines[i].trim();
+        let underline = lines[i + 1].trim();
+        if !heading.is_empty()
+            && !underline.is_empty()
+            && underline.len() >= heading.len()
+            && underline.chars().all(|c| "=-~^+#`*.".contains(c))
+        {
+            triples.push(Triple {
+                subject: format!("{}/{}", file_path, iri_safe(heading)),
+                predicate: "a".into(),
+                object: "Section".into(),
+            });
+        }
+    }
+}
+
+fn process_man_page(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    triples.push(Triple {
+        subject: file_path.to_string(),
+        predicate: "a".into(),
+        object: "Document".into(),
+    });
+
+    // groff/troff section headers: .SH "SECTION NAME" or .SH SECTION NAME
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(".SH ") {
+            let heading = rest.trim_matches('"').trim();
+            if !heading.is_empty() {
+                triples.push(Triple {
+                    subject: format!("{}/{}", file_path, iri_safe(heading)),
+                    predicate: "a".into(),
+                    object: "Section".into(),
+                });
+            }
+        }
+    }
+}
+
 fn process_non_code_file(path: &Path, source: &str, kind: NonCodeKind, triples: &mut Vec<Triple>) {
     match kind {
         NonCodeKind::Json => process_json_file(path, source, triples),
@@ -470,6 +551,9 @@ fn process_non_code_file(path: &Path, source: &str, kind: NonCodeKind, triples: 
         NonCodeKind::Markdown => process_markdown_file(path, source, triples),
         NonCodeKind::Html => process_html_file(path, source, triples),
         NonCodeKind::Css => process_css_file(path, source, triples),
+        NonCodeKind::AsciiDoc => process_asciidoc_file(path, source, triples),
+        NonCodeKind::ReStructuredText => process_rst_file(path, source, triples),
+        NonCodeKind::ManPage => process_man_page(path, source, triples),
     }
 }
 
@@ -643,7 +727,236 @@ fn detect_practice(path: &Path, file_name: &str) -> Option<(&'static str, &'stat
         return Some(("hasDocumentation", "pr-template"));
     }
 
+    // --- Linux packaging formats ---
+    if file_name.ends_with(".spec") {
+        return Some(("usesPackagingFormat", "rpm"));
+    }
+    match file_name {
+        "PKGBUILD" => return Some(("usesPackagingFormat", "arch")),
+        "snapcraft.yaml" => return Some(("usesPackagingFormat", "snap")),
+        "AppImageBuilder.yml" => return Some(("usesPackagingFormat", "appimage")),
+        _ => {}
+    }
+    if path_str.contains("/debian/") {
+        match file_name {
+            "control" | "rules" | "changelog" | "copyright" => {
+                return Some(("usesPackagingFormat", "deb"));
+            }
+            _ => {}
+        }
+    }
+    if path_str.contains("/flatpak/") || file_name.ends_with(".flatpakref") {
+        return Some(("usesPackagingFormat", "flatpak"));
+    }
+    match file_name {
+        "rpmlint.toml" | ".rpmlintrc" => return Some(("usesLinter", "rpmlint")),
+        _ => {}
+    }
+
+    // --- Red Hat / Fedora CI/CD ---
+    match file_name {
+        ".packit.yaml" | "packit.yaml" => return Some(("usesCIPlatform", "packit")),
+        ".zuul.yaml" | "zuul.yaml" => return Some(("usesCIPlatform", "zuul")),
+        "gating.yaml" => return Some(("followsConvention", "fedora-gating")),
+        _ => {}
+    }
+    if path_str.contains(".tekton/") && (file_name.ends_with(".yaml") || file_name.ends_with(".yml"))
+    {
+        return Some(("usesCIPlatform", "tekton"));
+    }
+    if path_str.contains(".zuul.d/") {
+        return Some(("usesCIPlatform", "zuul"));
+    }
+
+    // --- Linux / autotools build systems ---
+    match file_name {
+        "configure.ac" | "configure.in" | "Makefile.am" => {
+            return Some(("usesBuildTool", "autotools"));
+        }
+        "Kbuild" | "Kconfig" => return Some(("usesBuildTool", "kbuild")),
+        "tito.props" => return Some(("usesBuildTool", "tito")),
+        _ => {}
+    }
+    if path_str.contains(".tito/") {
+        return Some(("usesBuildTool", "tito"));
+    }
+
+    // --- Container variants (Podman, OSBS, Brew) ---
+    match file_name {
+        "Containerfile" => return Some(("usesContainerization", "podman")),
+        "container.yaml" => return Some(("usesContainerization", "osbs")),
+        _ => {}
+    }
+    // brew.Dockerfile, rhel.Dockerfile, etc.
+    if file_name != "Dockerfile"
+        && (file_name.ends_with(".Dockerfile") || file_name.ends_with("Dockerfile"))
+    {
+        return Some(("usesContainerization", "docker"));
+    }
+
+    // --- Testing frameworks (Linux/Python) ---
+    match file_name {
+        "tox.ini" => return Some(("usesTestFramework", "tox")),
+        _ => {}
+    }
+    if path_str.contains(".fmf/") || file_name.ends_with(".fmf") {
+        return Some(("usesTestFramework", "tmt"));
+    }
+    if path_str.contains("/molecule/") && (file_name == "molecule.yml" || file_name == "converge.yml")
+    {
+        return Some(("usesTestFramework", "molecule"));
+    }
+
+    // --- Configuration management ---
+    match file_name {
+        "ansible.cfg" | "galaxy.yml" => return Some(("usesConfigManagement", "ansible")),
+        "Puppetfile" => return Some(("usesConfigManagement", "puppet")),
+        "Berksfile" | ".kitchen.yml" | "kitchen.yml" => {
+            return Some(("usesConfigManagement", "chef"));
+        }
+        _ => {}
+    }
+    if path_str.contains("/playbooks/") && (file_name.ends_with(".yml") || file_name.ends_with(".yaml"))
+    {
+        return Some(("usesConfigManagement", "ansible"));
+    }
+    if path_str.contains("/roles/") && file_name == "main.yml" {
+        return Some(("usesConfigManagement", "ansible"));
+    }
+
+    // --- systemd ---
+    if file_name.ends_with(".service")
+        || file_name.ends_with(".timer")
+        || file_name.ends_with(".socket")
+        || file_name.ends_with(".target")
+        || file_name.ends_with(".mount")
+        || file_name.ends_with(".path")
+    {
+        return Some(("followsConvention", "systemd"));
+    }
+    if path_str.contains("tmpfiles.d/") || path_str.contains("sysusers.d/") {
+        return Some(("followsConvention", "systemd"));
+    }
+
+    // --- SELinux ---
+    if file_name.ends_with(".te") || file_name.ends_with(".fc") || file_name.ends_with(".if") {
+        if path_str.contains("selinux") || path_str.contains("policy") {
+            return Some(("followsConvention", "selinux"));
+        }
+    }
+
+    // --- D-Bus ---
+    if path_str.contains("dbus") && file_name.ends_with(".service") {
+        return Some(("followsConvention", "dbus"));
+    }
+    if path_str.contains("dbus") && file_name.ends_with(".conf") {
+        return Some(("followsConvention", "dbus"));
+    }
+    if path_str.contains("polkit") || file_name.ends_with(".policy") {
+        return Some(("followsConvention", "polkit"));
+    }
+    if path_str.contains("udev") && file_name.ends_with(".rules") {
+        return Some(("followsConvention", "udev"));
+    }
+
+    // --- Desktop / AppStream metadata ---
+    if file_name.ends_with(".desktop") {
+        return Some(("followsConvention", "desktop-entry"));
+    }
+    if file_name.ends_with(".metainfo.xml") || file_name.ends_with(".appdata.xml") {
+        return Some(("hasDocumentation", "appstream-metadata"));
+    }
+
+    // --- Red Hat product conventions ---
+    match file_name {
+        "MAINTAINERS" => return Some(("hasDocumentation", "maintainers")),
+        "PROJECT" if path_str.len() < 200 => {
+            // operator-sdk / kubebuilder project marker (only at top level)
+            return Some(("usesBuildTool", "operator-sdk"));
+        }
+        "watches.yaml" => return Some(("followsConvention", "ansible-operator")),
+        _ => {}
+    }
+    if path_str.contains("/bundle/") && file_name.ends_with(".clusterserviceversion.yaml") {
+        return Some(("followsConvention", "olm-operator"));
+    }
+
+    // Development environment
+    match file_name {
+        "devfile.yaml" | "devfile.yml" => return Some(("followsConvention", "devfile-development-environment")),
+        "flake.nix" | "shell.nix" | "default.nix" => return Some(("followsConvention", "nix-development-environment")),
+        "Vagrantfile" => return Some(("usesContainerization", "vagrant")),
+        _ => {}
+    }
+
+    // Deployment platforms
+    match file_name {
+        "serverless.yml" | "serverless.yaml" => return Some(("usesDeploymentPlatform", "serverless")),
+        "vercel.json" => return Some(("usesDeploymentPlatform", "vercel")),
+        "netlify.toml" => return Some(("usesDeploymentPlatform", "netlify")),
+        "fly.toml" => return Some(("usesDeploymentPlatform", "fly")),
+        "wrangler.toml" => return Some(("usesDeploymentPlatform", "cloudflare-workers")),
+        "Procfile" => return Some(("usesDeploymentPlatform", "heroku")),
+        "app.yaml" if path_str.contains("appengine") || path_str.contains("gae") => {
+            return Some(("usesDeploymentPlatform", "google-app-engine"));
+        }
+        _ => {}
+    }
+
+    // Container orchestration
+    match file_name {
+        "Chart.yaml" => return Some(("usesContainerization", "helm")),
+        "kustomization.yaml" | "kustomization.yml" => return Some(("usesContainerization", "kustomize")),
+        "skaffold.yaml" => return Some(("usesBuildTool", "skaffold")),
+        "Tiltfile" => return Some(("usesBuildTool", "tilt")),
+        "Earthfile" => return Some(("usesBuildTool", "earthly")),
+        _ => {}
+    }
+
+    // Additional build tools
+    match file_name {
+        "BUILD" | "BUILD.bazel" | "WORKSPACE" | "WORKSPACE.bazel" | ".bazelrc" => {
+            return Some(("usesBuildTool", "bazel"));
+        }
+        "Taskfile.yml" | "Taskfile.yaml" => return Some(("usesBuildTool", "task")),
+        "justfile" | "Justfile" | ".justfile" => return Some(("usesBuildTool", "just")),
+        "nx.json" => return Some(("usesBuildTool", "nx")),
+        "turbo.json" => return Some(("usesBuildTool", "turbo")),
+        "lerna.json" => return Some(("usesBuildTool", "lerna")),
+        "build.sbt" => return Some(("usesBuildTool", "sbt")),
+        "meson.build" => return Some(("usesBuildTool", "meson")),
+        _ => {}
+    }
+
+    // Code analysis
+    match file_name {
+        "sonar-project.properties" | "sonar-project.json" => {
+            return Some(("usesCodeAnalysis", "sonarqube"));
+        }
+        _ => {}
+    }
+    if file_name.starts_with(".codecov") {
+        return Some(("usesCodeAnalysis", "codecov"));
+    }
+
+    // API documentation
+    match file_name {
+        "openapi.yaml" | "openapi.yml" | "openapi.json" | "swagger.yaml"
+        | "swagger.yml" | "swagger.json" => {
+            return Some(("hasDocumentation", "api-spec"));
+        }
+        _ => {}
+    }
+
     // Conventions
+    match file_name {
+        ".pre-commit-config.yaml" => return Some(("followsConvention", "pre-commit-hooks")),
+        ".tool-versions" | ".nvmrc" | ".node-version" | ".python-version"
+        | ".ruby-version" | ".java-version" => {
+            return Some(("followsConvention", "version-pinning"));
+        }
+        _ => {}
+    }
     if file_name.starts_with(".commitlintrc") || file_name.starts_with("commitlint.config") {
         return Some(("followsConvention", "conventional-commits"));
     }
@@ -680,8 +993,736 @@ fn detect_layer(dir_name: &str) -> Option<&'static str> {
         "middleware" | "interceptors" => Some("middleware"),
         "utils" | "helpers" | "common" | "shared" => Some("utilities"),
         "migrations" | "seeds" => Some("database"),
-        "deploy" | "infra" | "terraform" | "k8s" | "kubernetes" => Some("infrastructure"),
+        "deploy" | "infra" | "terraform" | "k8s" | "kubernetes" | "openshift" => {
+            Some("infrastructure")
+        }
+        "ansible" | "playbooks" | "roles" => Some("automation"),
+        "selinux" | "apparmor" => Some("security"),
+        "systemd" | "init" => Some("system"),
+        "debian" | "rpm" | "packaging" => Some("packaging"),
+        "bundle" | "operator" | "operators" => Some("operators"),
+        "contrib" | "extras" => Some("contrib"),
         _ => None,
+    }
+}
+
+// --- Build file dependency extraction ---
+
+fn is_build_file(file_name: &str, ext: &str) -> bool {
+    matches!(
+        file_name,
+        "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "Cargo.toml"
+            | "go.mod"
+            | "Gemfile"
+            | "requirements.txt"
+            | "pyproject.toml"
+            | "composer.json"
+            | "Pipfile"
+            | "pubspec.yaml"
+            | "Package.swift"
+            | "build.sbt"
+            | "mix.exs"
+            | "Podfile"
+            | "Dockerfile"
+            | "Containerfile"
+            | "docker-compose.yml"
+            | "docker-compose.yaml"
+    ) || matches!(ext, "csproj" | "fsproj" | "spec")
+        || (file_name.ends_with("Dockerfile") || file_name.ends_with(".Dockerfile"))
+        || (ext == "control" && file_name == "control") // handled via path check in process_build_file
+}
+
+fn process_build_file(
+    path: &Path,
+    file_name: &str,
+    ext: &str,
+    source: &str,
+    triples: &mut Vec<Triple>,
+) {
+    let file_path = path.to_string_lossy();
+
+    // Mark as Config (except Dockerfile which is already its own thing)
+    if file_name != "Dockerfile" {
+        triples.push(Triple {
+            subject: file_path.to_string(),
+            predicate: "a".into(),
+            object: "Config".into(),
+        });
+    }
+
+    match file_name {
+        "pom.xml" => extract_pom_dependencies(path, source, triples),
+        "build.gradle" | "build.gradle.kts" => extract_gradle_dependencies(path, source, triples),
+        "Cargo.toml" => extract_cargo_dependencies(path, source, triples),
+        "go.mod" => extract_go_mod_dependencies(path, source, triples),
+        "Gemfile" | "Podfile" => extract_gemfile_dependencies(path, source, triples),
+        "requirements.txt" => extract_requirements_dependencies(path, source, triples),
+        "pyproject.toml" => extract_pyproject_dependencies(path, source, triples),
+        "composer.json" => extract_composer_dependencies(path, source, triples),
+        "Pipfile" => extract_pipfile_dependencies(path, source, triples),
+        "pubspec.yaml" => extract_pubspec_dependencies(path, source, triples),
+        "Package.swift" => extract_swift_package_dependencies(path, source, triples),
+        "build.sbt" => extract_sbt_dependencies(path, source, triples),
+        "mix.exs" => extract_mix_dependencies(path, source, triples),
+        "Dockerfile" | "Containerfile" => extract_dockerfile_dependencies(path, source, triples),
+        "docker-compose.yml" | "docker-compose.yaml" => {
+            extract_docker_compose_dependencies(path, source, triples);
+        }
+        _ if file_name.ends_with("Dockerfile") || file_name.ends_with(".Dockerfile") => {
+            extract_dockerfile_dependencies(path, source, triples);
+        }
+        _ => match ext {
+            "csproj" | "fsproj" => extract_dotnet_dependencies(path, source, triples),
+            "spec" => extract_spec_dependencies(path, source, triples),
+            _ => {
+                // debian/control — check path
+                if file_name == "control" && path.to_string_lossy().contains("/debian/") {
+                    extract_debian_dependencies(path, source, triples);
+                }
+            }
+        },
+    }
+}
+
+/// Extract XML tag text content: `<tag>value</tag>` → `Some("value")`.
+fn extract_xml_value<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
+    let open = line.find(&format!("<{tag}>"))?;
+    let start = open + tag.len() + 2; // skip `<tag>`
+    let end = line.find(&format!("</{tag}>"))?;
+    if start <= end {
+        Some(line[start..end].trim())
+    } else {
+        None
+    }
+}
+
+fn extract_pom_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    let mut in_dependency = false;
+    let mut group_id = String::new();
+    let mut artifact_id = String::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("<dependency>") || trimmed == "<dependency>" {
+            in_dependency = true;
+            group_id.clear();
+            artifact_id.clear();
+        } else if trimmed.starts_with("</dependency>") || trimmed == "</dependency>" {
+            if in_dependency && !artifact_id.is_empty() {
+                let dep_name = if group_id.is_empty() {
+                    artifact_id.clone()
+                } else {
+                    format!("{}:{}", group_id, artifact_id)
+                };
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(&dep_name),
+                });
+            }
+            in_dependency = false;
+        } else if in_dependency {
+            if let Some(val) = extract_xml_value(trimmed, "groupId") {
+                group_id = val.to_string();
+            }
+            if let Some(val) = extract_xml_value(trimmed, "artifactId") {
+                artifact_id = val.to_string();
+            }
+        }
+
+        // Detect build plugins that are practice-relevant (emitted as project triples)
+        if let Some(aid) = extract_xml_value(trimmed, "artifactId") {
+            match aid {
+                "maven-surefire-plugin" => {
+                    triples.push(Triple {
+                        subject: "project".into(),
+                        predicate: "usesBuildTool".into(),
+                        object: "maven-surefire".into(),
+                    });
+                }
+                "maven-failsafe-plugin" => {
+                    triples.push(Triple {
+                        subject: "project".into(),
+                        predicate: "usesBuildTool".into(),
+                        object: "maven-failsafe".into(),
+                    });
+                }
+                "maven-checkstyle-plugin" | "checkstyle" => {
+                    triples.push(Triple {
+                        subject: "project".into(),
+                        predicate: "usesLinter".into(),
+                        object: "checkstyle".into(),
+                    });
+                }
+                "spotbugs-maven-plugin" => {
+                    triples.push(Triple {
+                        subject: "project".into(),
+                        predicate: "usesLinter".into(),
+                        object: "spotbugs".into(),
+                    });
+                }
+                "jacoco-maven-plugin" => {
+                    triples.push(Triple {
+                        subject: "project".into(),
+                        predicate: "usesTestFramework".into(),
+                        object: "jacoco".into(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn extract_gradle_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        // Match: implementation 'group:name:version', testImplementation("group:name:version"), etc.
+        let is_dep = trimmed.starts_with("implementation")
+            || trimmed.starts_with("testImplementation")
+            || trimmed.starts_with("api ")
+            || trimmed.starts_with("compileOnly")
+            || trimmed.starts_with("runtimeOnly")
+            || trimmed.starts_with("annotationProcessor");
+
+        if !is_dep {
+            continue;
+        }
+
+        // Extract quoted coordinate: 'group:name:version' or "group:name:version"
+        let coord = trimmed
+            .split(['\'', '"'])
+            .find(|s| s.contains(':'));
+
+        if let Some(coord) = coord {
+            // Take group:name (drop version)
+            let parts: Vec<&str> = coord.splitn(3, ':').collect();
+            let dep_name = if parts.len() >= 2 {
+                format!("{}:{}", parts[0], parts[1])
+            } else {
+                coord.to_string()
+            };
+            triples.push(Triple {
+                subject: file_path.to_string(),
+                predicate: "dependsOn".into(),
+                object: iri_safe(&dep_name),
+            });
+        }
+    }
+}
+
+fn extract_cargo_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    let mut in_deps = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        // Section headers
+        if trimmed.starts_with('[') {
+            in_deps = trimmed == "[dependencies]"
+                || trimmed == "[dev-dependencies]"
+                || trimmed == "[build-dependencies]";
+            continue;
+        }
+        if !in_deps || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // Lines like: crate_name = "version" or crate_name = { version = "..." }
+        if let Some(name) = trimmed.split([' ', '=']).next() {
+            if !name.is_empty() && !name.starts_with('[') {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(name),
+                });
+            }
+        }
+    }
+}
+
+fn extract_go_mod_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    let mut in_require = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("require (") || trimmed == "require (" {
+            in_require = true;
+            continue;
+        }
+        if trimmed == ")" {
+            in_require = false;
+            continue;
+        }
+        if trimmed.starts_with("require ") && !trimmed.contains('(') {
+            // Single-line require
+            if let Some(module) = trimmed.strip_prefix("require ").and_then(|s| s.split_whitespace().next()) {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(module),
+                });
+            }
+            continue;
+        }
+        if in_require && !trimmed.is_empty() && !trimmed.starts_with("//") {
+            if let Some(module) = trimmed.split_whitespace().next() {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(module),
+                });
+            }
+        }
+    }
+}
+
+fn extract_gemfile_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("gem ") {
+            // gem 'name' or gem "name"
+            if let Some(name) = trimmed[4..].split(['\'', '"']).find(|s| !s.is_empty()) {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(name),
+                });
+            }
+        }
+    }
+}
+
+fn extract_requirements_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+            continue;
+        }
+        // Extract package name before version specifier
+        let name = trimmed
+            .split(['=', '>', '<', '~', '!', ';', '['])
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !name.is_empty() {
+            triples.push(Triple {
+                subject: file_path.to_string(),
+                predicate: "dependsOn".into(),
+                object: iri_safe(name),
+            });
+        }
+    }
+}
+
+fn extract_pyproject_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    let mut in_deps = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_deps = trimmed == "[project.dependencies]"
+                || trimmed == "[tool.poetry.dependencies]"
+                || trimmed == "[tool.poetry.dev-dependencies]";
+            continue;
+        }
+        if !in_deps || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // TOML: name = "version" or quoted dependency strings in arrays
+        if trimmed.starts_with('"') || trimmed.starts_with('\'') {
+            // Array entry like "requests>=2.0"
+            let unquoted = trimmed.trim_matches(|c| c == '"' || c == '\'' || c == ',');
+            let name = unquoted
+                .split(['>', '<', '=', '~', '!', ';', '['])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !name.is_empty() {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(name),
+                });
+            }
+        } else if let Some(name) = trimmed.split([' ', '=']).next() {
+            if !name.is_empty() && !name.starts_with('[') && name != "python" {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(name),
+                });
+            }
+        }
+    }
+}
+
+fn extract_composer_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(source) else {
+        return;
+    };
+    if let Some(obj) = parsed.as_object() {
+        for dep_key in &["require", "require-dev"] {
+            if let Some(deps) = obj.get(*dep_key).and_then(|v| v.as_object()) {
+                for pkg in deps.keys() {
+                    // Skip PHP itself and extension requirements
+                    if pkg != "php" && !pkg.starts_with("ext-") {
+                        triples.push(Triple {
+                            subject: file_path.to_string(),
+                            predicate: "dependsOn".into(),
+                            object: iri_safe(pkg),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn extract_pipfile_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    let mut in_deps = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_deps = trimmed == "[packages]" || trimmed == "[dev-packages]";
+            continue;
+        }
+        if !in_deps || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = trimmed.split([' ', '=']).next() {
+            if !name.is_empty() && !name.starts_with('[') {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(name),
+                });
+            }
+        }
+    }
+}
+
+fn extract_pubspec_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    let mut in_deps = false;
+
+    for line in source.lines() {
+        // Top-level keys (no leading whitespace) control sections
+        if !line.starts_with(' ') && !line.starts_with('\t') && !line.is_empty() {
+            let key = line.split(':').next().unwrap_or("").trim();
+            in_deps = key == "dependencies" || key == "dev_dependencies";
+            continue;
+        }
+        if !in_deps {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // "  package_name: ^1.0.0" or "  package_name:"
+        if let Some(name) = trimmed.split(':').next() {
+            let name = name.trim();
+            if !name.is_empty() && name != "sdk" && name != "flutter" {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(name),
+                });
+            }
+        }
+    }
+}
+
+fn extract_swift_package_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+
+    // .package(url: "https://github.com/user/repo", ...)
+    for segment in source.split(".package(") {
+        if let Some(url_start) = segment.find("url:") {
+            let rest = &segment[url_start + 4..];
+            if let Some(url) = rest.split('"').nth(1) {
+                let name = url
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(url)
+                    .trim_end_matches(".git");
+                if !name.is_empty() {
+                    triples.push(Triple {
+                        subject: file_path.to_string(),
+                        predicate: "dependsOn".into(),
+                        object: iri_safe(name),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn extract_sbt_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+
+    // "org.group" %% "name" % "version" or "org.group" % "name" % "version"
+    for line in source.lines() {
+        let parts: Vec<&str> = line.split('"').collect();
+        // Pattern: ... "group" %[%] "name" %[%] "version" ...
+        if parts.len() >= 6 {
+            let group = parts[1];
+            let name = parts[3];
+            if !group.is_empty()
+                && !name.is_empty()
+                && parts[2].contains('%')
+                && parts[4].contains('%')
+            {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(&format!("{group}:{name}")),
+                });
+            }
+        }
+    }
+}
+
+fn extract_mix_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+
+    // {:dep_name, "~> 1.0"} or {:dep_name, github: "..."}
+    for segment in source.split('{') {
+        let trimmed = segment.trim();
+        if trimmed.starts_with(':') {
+            if let Some(name) = trimmed[1..].split([',', '}']).next() {
+                let name = name.trim();
+                if !name.is_empty() {
+                    triples.push(Triple {
+                        subject: file_path.to_string(),
+                        predicate: "dependsOn".into(),
+                        object: iri_safe(name),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn extract_dotnet_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+
+    // <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("PackageReference") {
+            if let Some(start) = trimmed.find("Include=\"") {
+                let rest = &trimmed[start + 9..];
+                if let Some(end) = rest.find('"') {
+                    let pkg = &rest[..end];
+                    if !pkg.is_empty() {
+                        triples.push(Triple {
+                            subject: file_path.to_string(),
+                            predicate: "dependsOn".into(),
+                            object: iri_safe(pkg),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn extract_dockerfile_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        // FROM image:tag [AS alias]
+        if let Some(rest) = trimmed.strip_prefix("FROM ") {
+            let image = rest.split_whitespace().next().unwrap_or("");
+            if !image.is_empty() && image != "scratch" {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(image),
+                });
+            }
+        }
+    }
+}
+
+fn extract_docker_compose_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("image:") {
+            let image = rest.trim().trim_matches('"').trim_matches('\'');
+            if !image.is_empty() {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "dependsOn".into(),
+                    object: iri_safe(image),
+                });
+            }
+        }
+    }
+}
+
+/// Extract dependencies from RPM .spec files.
+/// Parses `Requires:`, `BuildRequires:`, `Name:`, `Version:` fields.
+fn extract_spec_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+
+        // Skip comments and macros-only lines
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+
+        // Requires: pkg >= version or BuildRequires: pkg
+        let dep_value = if let Some(rest) = trimmed.strip_prefix("Requires:") {
+            Some(rest)
+        } else if let Some(rest) = trimmed.strip_prefix("BuildRequires:") {
+            Some(rest)
+        } else {
+            None
+        };
+
+        if let Some(rest) = dep_value {
+            // May have multiple comma-separated deps, or version constraints
+            for dep in rest.split(',') {
+                let dep = dep.trim();
+                // Take the package name (before version operators)
+                let name = dep
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !name.is_empty() && !name.starts_with('%') && !name.starts_with('/') {
+                    triples.push(Triple {
+                        subject: file_path.to_string(),
+                        predicate: "dependsOn".into(),
+                        object: iri_safe(name),
+                    });
+                }
+            }
+        }
+
+        // Extract Name and Version as declarations
+        if let Some(rest) = trimmed.strip_prefix("Name:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "declares".into(),
+                    object: iri_safe(name),
+                });
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("Version:") {
+            let version = rest.trim();
+            if !version.is_empty() {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "declares".into(),
+                    object: iri_safe(&format!("version:{version}")),
+                });
+            }
+        }
+    }
+}
+
+/// Extract dependencies from Debian control files.
+/// Parses `Depends:`, `Build-Depends:`, `Recommends:` fields.
+fn extract_debian_dependencies(path: &Path, source: &str, triples: &mut Vec<Triple>) {
+    let file_path = path.to_string_lossy();
+    let mut current_is_dep = false;
+
+    for line in source.lines() {
+        if line.is_empty() {
+            current_is_dep = false;
+            continue;
+        }
+
+        // Continuation lines start with whitespace
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if current_is_dep {
+                // Parse continuation dep list
+                for dep in line.split(',') {
+                    extract_debian_dep_name(dep.trim(), &file_path, triples);
+                }
+            }
+            continue;
+        }
+
+        current_is_dep = false;
+
+        let dep_value = if let Some(rest) = line.strip_prefix("Depends:") {
+            Some(rest)
+        } else if let Some(rest) = line.strip_prefix("Build-Depends:") {
+            Some(rest)
+        } else if let Some(rest) = line.strip_prefix("Build-Depends-Indep:") {
+            Some(rest)
+        } else if let Some(rest) = line.strip_prefix("Recommends:") {
+            Some(rest)
+        } else if let Some(rest) = line.strip_prefix("Pre-Depends:") {
+            Some(rest)
+        } else {
+            None
+        };
+
+        if let Some(rest) = dep_value {
+            current_is_dep = true;
+            for dep in rest.split(',') {
+                extract_debian_dep_name(dep.trim(), &file_path, triples);
+            }
+        }
+
+        // Extract package name
+        if let Some(rest) = line.strip_prefix("Package:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                triples.push(Triple {
+                    subject: file_path.to_string(),
+                    predicate: "declares".into(),
+                    object: iri_safe(name),
+                });
+            }
+        }
+
+    }
+}
+
+fn extract_debian_dep_name(dep: &str, file_path: &str, triples: &mut Vec<Triple>) {
+    if dep.is_empty() {
+        return;
+    }
+    // "pkg (>= version) | alt" — take first alternative, strip version
+    let first_alt = dep.split('|').next().unwrap_or(dep).trim();
+    let name = first_alt
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("${");
+    if !name.is_empty() && !name.starts_with('$') && !name.contains('}') {
+        triples.push(Triple {
+            subject: file_path.to_string(),
+            predicate: "dependsOn".into(),
+            object: iri_safe(name),
+        });
     }
 }
 
@@ -792,6 +1833,13 @@ impl ignore::ParallelVisitor for TripleVisitor<'_> {
                         }
                     }
                 }
+            }
+        }
+
+        // 0.5. Build file dependency extraction
+        if is_build_file(file_name, ext) {
+            if let Ok(source) = std::fs::read_to_string(path) {
+                process_build_file(path, file_name, ext, &source, &mut self.local);
             }
         }
 
@@ -1113,5 +2161,377 @@ mod tests {
             "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesContainerization> ?v }"
         ).unwrap();
         assert!(!docker.as_array().unwrap().is_empty(), "should detect docker");
+    }
+
+    #[test]
+    fn ingest_pom_xml_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("pom.xml"),
+            r#"<project>
+  <dependencies>
+    <dependency>
+      <groupId>org.testng</groupId>
+      <artifactId>testng</artifactId>
+      <version>7.8.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>3.11.2</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>"#,
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        // Should detect dependencies
+        let deps = store.query_to_json(
+            "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
+        ).unwrap();
+        let dep_arr = deps.as_array().unwrap();
+        assert!(dep_arr.len() >= 2, "expected testng + mockito deps, got {}", dep_arr.len());
+
+        // Should detect maven build tool
+        let maven = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesBuildTool> ?v }"
+        ).unwrap();
+        assert!(!maven.as_array().unwrap().is_empty(), "should detect maven + surefire");
+
+        // Should be typed as Config
+        let configs = store.query_to_json(
+            "SELECT ?c WHERE { ?c <http://repo.example.org/a> <http://repo.example.org/Config> }"
+        ).unwrap();
+        assert!(!configs.as_array().unwrap().is_empty(), "pom.xml should be Config type");
+    }
+
+    #[test]
+    fn ingest_cargo_toml_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+
+[dependencies]
+serde = "1.0"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"
+"#,
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        let deps = store.query_to_json(
+            "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
+        ).unwrap();
+        let dep_arr = deps.as_array().unwrap();
+        assert!(dep_arr.len() >= 3, "expected serde, tokio, tempfile deps, got {}", dep_arr.len());
+    }
+
+    #[test]
+    fn ingest_go_mod_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            r#"module example.com/myapp
+
+go 1.21
+
+require (
+	github.com/gin-gonic/gin v1.9.1
+	github.com/stretchr/testify v1.8.4
+)
+
+require github.com/single/dep v0.1.0
+"#,
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        let deps = store.query_to_json(
+            "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
+        ).unwrap();
+        let dep_arr = deps.as_array().unwrap();
+        assert!(dep_arr.len() >= 3, "expected gin, testify, single/dep, got {}", dep_arr.len());
+    }
+
+    #[test]
+    fn ingest_dockerfile_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Dockerfile"),
+            "FROM node:18-alpine AS builder\nRUN npm install\nFROM nginx:latest\nCOPY --from=builder /app /usr/share/nginx\n",
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        let deps = store.query_to_json(
+            "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
+        ).unwrap();
+        let dep_arr = deps.as_array().unwrap();
+        assert!(dep_arr.len() >= 2, "expected node + nginx base images, got {}", dep_arr.len());
+    }
+
+    #[test]
+    fn ingest_dotnet_csproj_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("MyApp.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="7.0.0" />
+  </ItemGroup>
+</Project>"#,
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        let deps = store.query_to_json(
+            "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
+        ).unwrap();
+        let dep_arr = deps.as_array().unwrap();
+        assert!(dep_arr.len() >= 2, "expected 2 NuGet packages, got {}", dep_arr.len());
+    }
+
+    #[test]
+    fn ingest_composer_json_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require": {"laravel/framework": "^10.0", "guzzlehttp/guzzle": "^7.0"}, "require-dev": {"phpunit/phpunit": "^10.0"}}"#,
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        let deps = store.query_to_json(
+            "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
+        ).unwrap();
+        let dep_arr = deps.as_array().unwrap();
+        assert!(dep_arr.len() >= 3, "expected laravel, guzzle, phpunit deps, got {}", dep_arr.len());
+    }
+
+    #[test]
+    fn ingest_new_practice_detections() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("serverless.yml"), "service: myapp").unwrap();
+        fs::write(dir.path().join("sonar-project.properties"), "sonar.projectKey=test").unwrap();
+        fs::write(dir.path().join(".nvmrc"), "18").unwrap();
+        fs::write(dir.path().join("openapi.yaml"), "openapi: 3.0.0").unwrap();
+        fs::write(dir.path().join(".pre-commit-config.yaml"), "repos: []").unwrap();
+        fs::write(dir.path().join("justfile"), "build:\n\tcargo build").unwrap();
+        fs::write(dir.path().join("Chart.yaml"), "apiVersion: v2").unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        // Deployment platform
+        let deploy = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesDeploymentPlatform> ?v }"
+        ).unwrap();
+        assert!(!deploy.as_array().unwrap().is_empty(), "should detect serverless");
+
+        // Code analysis
+        let analysis = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesCodeAnalysis> ?v }"
+        ).unwrap();
+        assert!(!analysis.as_array().unwrap().is_empty(), "should detect sonarqube");
+
+        // Version pinning
+        let conv = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/followsConvention> ?v }"
+        ).unwrap();
+        let vals: Vec<String> = conv.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(vals.iter().any(|v| v.contains("version-pinning")), "should detect version pinning, got {:?}", vals);
+        assert!(vals.iter().any(|v| v.contains("pre-commit")), "should detect pre-commit, got {:?}", vals);
+
+        // API spec documentation
+        let docs = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/hasDocumentation> ?v }"
+        ).unwrap();
+        let doc_vals: Vec<String> = docs.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(doc_vals.iter().any(|v| v.contains("api-spec")), "should detect api-spec, got {:?}", doc_vals);
+
+        // Build tools
+        let build = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesBuildTool> ?v }"
+        ).unwrap();
+        let build_vals: Vec<String> = build.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(build_vals.iter().any(|v| v.contains("just")), "should detect just, got {:?}", build_vals);
+
+        // Container orchestration
+        let containers = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesContainerization> ?v }"
+        ).unwrap();
+        let container_vals: Vec<String> = containers.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(container_vals.iter().any(|v| v.contains("helm")), "should detect helm, got {:?}", container_vals);
+    }
+
+    #[test]
+    fn ingest_rpm_spec_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("mypackage.spec"),
+            "Name: mypackage\nVersion: 1.0.0\nRelease: 1%{?dist}\n\
+             BuildRequires: gcc\nBuildRequires: make\n\
+             Requires: openssl-libs\nRequires: python3\n\
+             %description\nA test package\n",
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        let deps = store.query_to_json(
+            "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
+        ).unwrap();
+        let dep_arr = deps.as_array().unwrap();
+        assert!(dep_arr.len() >= 4, "expected gcc, make, openssl-libs, python3 deps, got {}", dep_arr.len());
+
+        // Should detect RPM packaging format
+        let pkg = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesPackagingFormat> ?v }"
+        ).unwrap();
+        assert!(!pkg.as_array().unwrap().is_empty(), "should detect rpm packaging");
+    }
+
+    #[test]
+    fn ingest_asciidoc_document() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("guide.adoc"),
+            "= Main Title\n\nSome text.\n\n== Installation\n\nSteps here.\n\n== Usage\n\nUsage info.\n",
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        let docs = store.query_to_json(
+            "SELECT ?d WHERE { ?d <http://repo.example.org/a> <http://repo.example.org/Document> }"
+        ).unwrap();
+        assert!(!docs.as_array().unwrap().is_empty(), "should detect adoc as Document");
+
+        let sections = store.query_to_json(
+            "SELECT ?s WHERE { ?s <http://repo.example.org/a> <http://repo.example.org/Section> }"
+        ).unwrap();
+        assert!(sections.as_array().unwrap().len() >= 3, "expected 3 headings from adoc");
+    }
+
+    #[test]
+    fn ingest_linux_practices() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // systemd
+        let systemd = dir.path().join("systemd");
+        fs::create_dir_all(&systemd).unwrap();
+        fs::write(systemd.join("myapp.service"), "[Unit]\nDescription=My App\n").unwrap();
+
+        // Containerfile
+        fs::write(dir.path().join("Containerfile"), "FROM registry.access.redhat.com/ubi9:latest\n").unwrap();
+
+        // packit
+        fs::write(dir.path().join(".packit.yaml"), "downstream_package_name: myapp\n").unwrap();
+
+        // autotools
+        fs::write(dir.path().join("configure.ac"), "AC_INIT([myapp], [1.0])\n").unwrap();
+
+        // tox
+        fs::write(dir.path().join("tox.ini"), "[tox]\nenvlist = py39\n").unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        // systemd convention
+        let conv = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/followsConvention> ?v }"
+        ).unwrap();
+        let vals: Vec<String> = conv.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(vals.iter().any(|v| v.contains("systemd")), "should detect systemd, got {:?}", vals);
+
+        // podman containerization
+        let containers = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesContainerization> ?v }"
+        ).unwrap();
+        assert!(!containers.as_array().unwrap().is_empty(), "should detect podman from Containerfile");
+
+        // packit CI
+        let ci = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesCIPlatform> ?v }"
+        ).unwrap();
+        let ci_vals: Vec<String> = ci.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(ci_vals.iter().any(|v| v.contains("packit")), "should detect packit, got {:?}", ci_vals);
+
+        // autotools
+        let build = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesBuildTool> ?v }"
+        ).unwrap();
+        let build_vals: Vec<String> = build.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(build_vals.iter().any(|v| v.contains("autotools")), "should detect autotools, got {:?}", build_vals);
+
+        // tox testing
+        let test = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/usesTestFramework> ?v }"
+        ).unwrap();
+        let test_vals: Vec<String> = test.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(test_vals.iter().any(|v| v.contains("tox")), "should detect tox, got {:?}", test_vals);
+
+        // Containerfile FROM deps
+        let deps = store.query_to_json(
+            "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
+        ).unwrap();
+        assert!(!deps.as_array().unwrap().is_empty(), "should extract FROM base image as dependency");
+    }
+
+    #[test]
+    fn ingest_devfile_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("devfile.yaml"), "schemaVersion: 2.3.0").unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        let conv = store.query_to_json(
+            "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/followsConvention> ?v }"
+        ).unwrap();
+        let vals: Vec<String> = conv.as_array().unwrap().iter()
+            .filter_map(|r| r.get("v").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(
+            vals.iter().any(|v| v.contains("devfile")),
+            "should detect devfile convention, got {:?}", vals
+        );
     }
 }

@@ -38,7 +38,9 @@ beret/
 - All SPARQL query tools accept `exclude: &[String]` for directory exclusion via `exclude_filters()` helper
 - `find_symbol`, `find_callers` (optional name), `find_callees` (optional name), `list_structures`, `file_stats`, `find_dead_code`, `find_dependencies`, `find_entry_points` — SPARQL-backed
 - `search_pattern(root, pattern, language, exclude, limit)` — live ast-grep walk
-- `describe_practices`, `describe_testing`, `describe_ci_cd`, `describe_code_quality`, `describe_architecture`, `describe_documentation`, `describe_dependencies` — practice analysis
+- `describe_project` — consolidated analysis with `generate_insights()` cross-cutting observations
+- `describe_practices`, `describe_testing`, `describe_ci_cd`, `describe_code_quality`, `describe_architecture`, `describe_documentation`, `describe_dependencies` — individual practice analysis
+- `describe_testing` also calls `detect_test_deps_from_graph()` to find test frameworks from `dependsOn` triples
 - `generate_diagram(store, scope, depth, code_only, exclude, limit)` — LikeC4 DSL generation:
   - Auto-depth (0): picks 1/2/3 based on codebase size (≤100→3, ≤500→2, 500+→1)
   - `code_only=true` (default): SPARQL-level filter to Function/Class only + excludes 17 non-source dirs
@@ -57,8 +59,10 @@ beret/
 
 ### ingestor.rs — Parallel Ingestion + Practice Detection
 - `hidden(false)` — walks dotfiles (`.github/`, `.eslintrc`, etc.) for practice detection
-- Three extraction tiers: **AST** (17 languages), **Non-code text**, **Binary metadata**
-- **Practice detection**: `detect_practice(path, file_name)` matches 60+ file patterns → `<project>` triples
+- Four extraction tiers: **AST** (17 languages), **Build files** (20+ manifest types), **Non-code text** (JSON, YAML, Markdown, HTML, CSS, AsciiDoc, reStructuredText, man pages), **Binary metadata**
+- **Build file extraction**: `process_build_file()` extracts `dependsOn` triples from: pom.xml, build.gradle(.kts), Cargo.toml, go.mod, Gemfile, Podfile, requirements.txt, pyproject.toml, composer.json, Pipfile, pubspec.yaml, Package.swift, build.sbt, mix.exs, .csproj/.fsproj, Dockerfile/Containerfile/\*.Dockerfile (FROM), docker-compose.yml (image), .spec (Requires/BuildRequires), debian/control (Depends/Build-Depends). Also detects Maven plugins as practice triples.
+- **Practice detection**: `detect_practice(path, file_name)` matches 120+ file patterns → `<project>` triples. Predicates: `usesCIPlatform`, `usesContainerization`, `usesBuildTool`, `usesLinter`, `usesFormatter`, `usesTestFramework`, `usesTypeChecking`, `usesPackageManager`, `hasDocumentation`, `followsConvention`, `usesDeploymentPlatform`, `usesCodeAnalysis`, `usesPackagingFormat`, `usesConfigManagement`
+- **Linux/Red Hat coverage**: RPM spec files, Containerfile/Podman, Packit/Zuul/Tekton CI, autotools/Kbuild, systemd units, SELinux policy, D-Bus/polkit/udev, tmt/FMF testing, Ansible/Puppet/Chef config management, Helm/Kustomize, OLM operators, Fedora gating, deb/arch/snap/flatpak packaging, AsciiDoc/RST/man page documentation
 - **Layer detection**: `detect_layer(dir_name)` maps 30+ dir names → `hasLayer` triples
 - Thread-local `HashSet` deduplication for practices; `iri_safe()` for text values
 
@@ -81,10 +85,11 @@ All list-returning tools support `limit`, `offset`, and `exclude` parameters.
 | `find_entry_points` | 100 | Entry points (main/index/app/server/cli) |
 | `search_pattern` | 200 | Live ast-grep search |
 | `generate_diagram` | 500 | LikeC4 diagram (auto-depth, code_only, Beret theme) |
+| `describe_project` | — | **Recommended first call.** Consolidated project analysis with cross-cutting insights |
 | `describe_practices` | — | Summary of all detected practices |
-| `describe_testing` | — | Test frameworks, test ratio |
-| `describe_ci_cd` | — | CI platforms, containers, build tools |
-| `describe_code_quality` | — | Linters, formatters, type checkers, conventions |
+| `describe_testing` | — | Test frameworks, test dependencies from graph, test ratio |
+| `describe_ci_cd` | — | CI platforms, containers, build tools, deployment platforms |
+| `describe_code_quality` | — | Linters, formatters, type checkers, conventions, code analysis |
 | `describe_architecture` | — | Layers, monorepo detection, structure counts |
 | `describe_documentation` | — | Doc artifacts, coverage |
 | `describe_dependencies` | — | Package managers, dep count, auto-updates |
