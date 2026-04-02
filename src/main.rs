@@ -332,6 +332,13 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              and whether automated dependency updates (Renovate, Dependabot) are configured.",
             &[], &[],
         ),
+        tool(
+            "describe_activity", "Describe Activity",
+            "Analyze human activity in the codebase from git history: top contributors, \
+             most active files, recent commits, and commit frequency. Requires the \
+             indexed directory to be a git repository.",
+            &[], &[],
+        ),
     ];
 
     if http_mode {
@@ -709,6 +716,11 @@ impl ServerHandler for BeretHandler {
 
             "describe_dependencies" => {
                 tools::describe_dependencies(&self.store)
+                    .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
+            }
+
+            "describe_activity" => {
+                tools::describe_activity(&self.store)
                     .map_or_else(|e| Err(Self::err(e)), Self::ok_json)
             }
 

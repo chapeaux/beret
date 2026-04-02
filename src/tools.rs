@@ -285,9 +285,7 @@ pub fn describe_testing(store: &CodebaseStore) -> Result<Value, String> {
     let frameworks = query_practice_values(store, "usesTestFramework")?;
     let test_deps = detect_test_deps_from_graph(store)?;
     let total_functions = count_type(store, "Function", None)?;
-    let test_functions = count_type(store, "Function", Some("test"))?;
-    let spec_functions = count_type(store, "Function", Some("spec"))?;
-    let test_related = test_functions + spec_functions;
+    let test_related = count_test_functions(store)?;
 
     let mut result = Map::new();
     result.insert("frameworks".into(), Value::Array(frameworks.into_iter().map(Value::String).collect()));
@@ -301,6 +299,27 @@ pub fn describe_testing(store: &CodebaseStore) -> Result<Value, String> {
         result.insert("test_ratio_percent".into(), Value::Number(ratio.into()));
     }
     Ok(Value::Object(result))
+}
+
+/// Count test functions using both annotation-based `isTestFunction` triples
+/// and path-based heuristic (path contains "test" or "spec"), deduplicated.
+fn count_test_functions(store: &CodebaseStore) -> Result<usize, String> {
+    let sparql = format!(
+        r#"SELECT (COUNT(DISTINCT ?s) AS ?count) WHERE {{
+            {{ ?s <{P}isTestFunction> <{P}true> . }}
+            UNION
+            {{ ?s <{P}a> <{P}Function> .
+               FILTER(CONTAINS(LCASE(STR(?s)), "test") || CONTAINS(LCASE(STR(?s)), "spec")) }}
+        }}"#
+    );
+    let rows = store.query_to_json(&sparql).map_err(|e| e.to_string())?;
+    Ok(rows
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|r| r.get("count"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.trim_matches('"').parse::<usize>().ok())
+        .unwrap_or(0))
 }
 
 /// Detect test framework dependencies from the `dependsOn` graph.
@@ -475,6 +494,117 @@ pub fn describe_dependencies(store: &CodebaseStore) -> Result<Value, String> {
     Ok(Value::Object(result))
 }
 
+// --- Git activity analysis ---
+
+pub fn describe_activity(store: &CodebaseStore) -> Result<Value, String> {
+    let mut result = Map::new();
+
+    // Total commits indexed.
+    let total_commits = count_type(store, "Commit", None)?;
+    result.insert("total_commits".into(), Value::Number(total_commits.into()));
+
+    if total_commits == 0 {
+        return Ok(Value::Object(result));
+    }
+
+    // Top contributors by commit count.
+    let contrib_sparql = format!(
+        r#"SELECT ?author (COUNT(?commit) AS ?commits) WHERE {{
+            ?commit <{P}commitAuthor> ?author .
+        }} GROUP BY ?author ORDER BY DESC(?commits)"#
+    );
+    let contrib_rows = store.query_to_json(&contrib_sparql).map_err(|e| e.to_string())?;
+    let mut contributors: Vec<Value> = Vec::new();
+    for row in contrib_rows.as_array().unwrap_or(&vec![]) {
+        let author = row.get("author").and_then(|v| v.as_str()).unwrap_or("");
+        let commits = row.get("commits").and_then(|v| v.as_str()).unwrap_or("0");
+        let author_clean = author
+            .strip_prefix(&format!("<{P}"))
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(author);
+        let commits_clean = commits
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(commits);
+        let mut entry = Map::new();
+        entry.insert("name".into(), Value::String(author_clean.to_string()));
+        entry.insert("commits".into(), Value::Number(
+            commits_clean.parse::<u64>().unwrap_or(0).into()
+        ));
+        contributors.push(Value::Object(entry));
+    }
+    result.insert("contributors".into(), Value::Array(contributors));
+
+    // Most active files (by commit count, sorted in Rust).
+    let active_sparql = format!(
+        r#"SELECT ?file ?count WHERE {{
+            ?file <{P}commitCount> ?count .
+        }}"#
+    );
+    let active_rows = store.query_to_json(&active_sparql).map_err(|e| e.to_string())?;
+    let mut active_files: Vec<(String, usize)> = Vec::new();
+    for row in active_rows.as_array().unwrap_or(&vec![]) {
+        let file = row.get("file").and_then(|v| v.as_str()).unwrap_or("");
+        let count = row.get("count").and_then(|v| v.as_str()).unwrap_or("0");
+        let file_clean = file
+            .strip_prefix(&format!("<{P}"))
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(file);
+        let count_clean = count
+            .strip_prefix(&format!("<{P}"))
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(count)
+            .trim_matches('"');
+        active_files.push((file_clean.to_string(), count_clean.parse().unwrap_or(0)));
+    }
+    active_files.sort_by(|a, b| b.1.cmp(&a.1));
+    active_files.truncate(20);
+    let active_arr: Vec<Value> = active_files
+        .into_iter()
+        .map(|(file, count)| {
+            let mut entry = Map::new();
+            entry.insert("file".into(), Value::String(file));
+            entry.insert("commits".into(), Value::Number(count.into()));
+            Value::Object(entry)
+        })
+        .collect();
+    result.insert("most_active_files".into(), Value::Array(active_arr));
+
+    // Recent commits (last 10).
+    let recent_sparql = format!(
+        r#"SELECT ?commit ?author ?date ?message WHERE {{
+            <{P}project> <{P}hasCommit> ?commit .
+            ?commit <{P}commitAuthor> ?author .
+            ?commit <{P}commitDate> ?date .
+            ?commit <{P}commitMessage> ?message .
+        }} ORDER BY DESC(?date) LIMIT 10"#
+    );
+    let recent_rows = store.query_to_json(&recent_sparql).map_err(|e| e.to_string())?;
+    let recent: Vec<Value> = recent_rows
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|row| {
+            let strip = |key: &str| -> String {
+                let val = row.get(key).and_then(|v| v.as_str()).unwrap_or("");
+                val.strip_prefix(&format!("<{P}"))
+                    .and_then(|s| s.strip_suffix('>'))
+                    .unwrap_or(val)
+                    .to_string()
+            };
+            let mut entry = Map::new();
+            entry.insert("hash".into(), Value::String(strip("commit")));
+            entry.insert("author".into(), Value::String(strip("author")));
+            entry.insert("date".into(), Value::String(strip("date")));
+            entry.insert("message".into(), Value::String(strip("message")));
+            Value::Object(entry)
+        })
+        .collect();
+    result.insert("recent_commits".into(), Value::Array(recent));
+
+    Ok(Value::Object(result))
+}
+
 // --- Unified project description ---
 
 pub fn describe_project(store: &CodebaseStore) -> Result<Value, String> {
@@ -487,6 +617,9 @@ pub fn describe_project(store: &CodebaseStore) -> Result<Value, String> {
     result.insert("architecture".into(), describe_architecture(store)?);
     result.insert("documentation".into(), describe_documentation(store)?);
     result.insert("dependencies".into(), describe_dependencies(store)?);
+    if let Ok(activity) = describe_activity(store) {
+        result.insert("activity".into(), activity);
+    }
 
     let insights = generate_insights(&result);
     if !insights.is_empty() {
@@ -729,6 +862,47 @@ fn generate_insights(data: &Map<String, Value>) -> Vec<String> {
         insights.push(
             "Implements the Kubernetes Operator pattern with OLM lifecycle management.".into(),
         );
+    }
+
+    // Git activity insights
+    if let Some(activity) = data.get("activity") {
+        let total_commits = activity.get("total_commits").and_then(|v| v.as_u64()).unwrap_or(0);
+        let contributor_count = activity
+            .get("contributors")
+            .and_then(|v| v.as_array())
+            .map_or(0, |a| a.len());
+
+        if total_commits > 0 && contributor_count > 0 {
+            let maturity = if total_commits > 100 {
+                "mature"
+            } else if total_commits > 20 {
+                "active"
+            } else {
+                "early-stage"
+            };
+            insights.push(format!(
+                "{} contributor(s) across {} indexed commits — {} development history.",
+                contributor_count, total_commits, maturity
+            ));
+
+            // Bus factor warning: single contributor > 80% of commits.
+            if contributor_count >= 2 {
+                if let Some(contributors) = activity.get("contributors").and_then(|v| v.as_array()) {
+                    if let Some(top) = contributors.first() {
+                        let top_commits = top.get("commits").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if total_commits > 0
+                            && (top_commits as f64 / total_commits as f64) > 0.8
+                        {
+                            let name = top.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                            insights.push(format!(
+                                "Bus factor risk: {} has >80% of commits — knowledge concentration.",
+                                name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Cap at 12

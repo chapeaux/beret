@@ -40,7 +40,9 @@ beret/
 - `search_pattern(root, pattern, language, exclude, limit)` — live ast-grep walk
 - `describe_project` — consolidated analysis with `generate_insights()` cross-cutting observations
 - `describe_practices`, `describe_testing`, `describe_ci_cd`, `describe_code_quality`, `describe_architecture`, `describe_documentation`, `describe_dependencies` — individual practice analysis
+- `describe_testing` uses `count_test_functions()` which combines annotation-based `isTestFunction` triples with path-based heuristics via SPARQL UNION + DISTINCT
 - `describe_testing` also calls `detect_test_deps_from_graph()` to find test frameworks from `dependsOn` triples
+- `describe_activity` — git-based human activity analysis: top contributors, most active files, recent commits
 - `generate_diagram(store, scope, depth, code_only, exclude, limit)` — LikeC4 DSL generation:
   - Auto-depth (0): picks 1/2/3 based on codebase size (≤100→3, ≤500→2, 500+→1)
   - `code_only=true` (default): SPARQL-level filter to Function/Class only + excludes 17 non-source dirs
@@ -63,6 +65,8 @@ beret/
 - **Build file extraction**: `process_build_file()` extracts `dependsOn` triples from: pom.xml, build.gradle(.kts), Cargo.toml, go.mod, Gemfile, Podfile, requirements.txt, pyproject.toml, composer.json, Pipfile, pubspec.yaml, Package.swift, build.sbt, mix.exs, .csproj/.fsproj, Dockerfile/Containerfile/\*.Dockerfile (FROM), docker-compose.yml (image), .spec (Requires/BuildRequires), debian/control (Depends/Build-Depends). Also detects Maven plugins as practice triples.
 - **Practice detection**: `detect_practice(path, file_name)` matches 120+ file patterns → `<project>` triples. Predicates: `usesCIPlatform`, `usesContainerization`, `usesBuildTool`, `usesLinter`, `usesFormatter`, `usesTestFramework`, `usesTypeChecking`, `usesPackageManager`, `hasDocumentation`, `followsConvention`, `usesDeploymentPlatform`, `usesCodeAnalysis`, `usesPackagingFormat`, `usesConfigManagement`
 - **Linux/Red Hat coverage**: RPM spec files, Containerfile/Podman, Packit/Zuul/Tekton CI, autotools/Kbuild, systemd units, SELinux policy, D-Bus/polkit/udev, tmt/FMF testing, Ansible/Puppet/Chef config management, Helm/Kustomize, OLM operators, Fedora gating, deb/arch/snap/flatpak packaging, AsciiDoc/RST/man page documentation
+- **Test annotation detection**: `LangConfig.test_annotations` field enables annotation-aware test detection during AST extraction. Java (`@Test`, `@ParameterizedTest`, `@RepeatedTest`) and C# (`[TestMethod]`, `[Fact]`, `[Theory]`, `[Test]`) emit `isTestFunction` triples. Path-based heuristic (`/test/`, `/tests/`, `/__tests__/`, `/spec/`) also emits `isTestFunction`.
+- **Git history ingestion**: `process_git_history()` runs after the file walk, parses `git log` output (last 500 commits), and emits commit-level triples (`hasCommit`, `commitAuthor`, `commitDate`, `commitMessage`, `commitTouches`) and per-file aggregates (`lastModifiedBy`, `lastModifiedDate`, `commitCount`, `contributedBy`). Graceful no-op if not a git repo.
 - **Layer detection**: `detect_layer(dir_name)` maps 30+ dir names → `hasLayer` triples
 - Thread-local `HashSet` deduplication for practices; `iri_safe()` for text values
 
@@ -93,6 +97,7 @@ All list-returning tools support `limit`, `offset`, and `exclude` parameters.
 | `describe_architecture` | — | Layers, monorepo detection, structure counts |
 | `describe_documentation` | — | Doc artifacts, coverage |
 | `describe_dependencies` | — | Package managers, dep count, auto-updates |
+| `describe_activity` | — | Git activity: top contributors, most active files, recent commits |
 
 ### HTTP mode only
 | Tool | Purpose |

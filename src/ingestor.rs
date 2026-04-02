@@ -27,6 +27,9 @@ struct LangConfig {
     name_strategy: NameStrategy,
     /// How to extract the callee name from a call node.
     call_strategy: CallStrategy,
+    /// Annotation node kinds and test annotation names for test detection.
+    /// Each entry: (annotation_node_kind, &[annotation_names]).
+    test_annotations: &'static [(&'static str, &'static [&'static str])],
 }
 
 #[derive(Clone, Copy)]
@@ -53,9 +56,12 @@ enum CallStrategy {
 
 macro_rules! lang {
     ($lang:ident, $funcs:expr, $classes:expr, $calls:expr) => {
-        lang!($lang, $funcs, $classes, $calls, NameStrategy::FieldName, CallStrategy::FieldFunction)
+        lang!($lang, $funcs, $classes, $calls, NameStrategy::FieldName, CallStrategy::FieldFunction, &[])
     };
     ($lang:ident, $funcs:expr, $classes:expr, $calls:expr, $name:expr, $call:expr) => {
+        lang!($lang, $funcs, $classes, $calls, $name, $call, &[])
+    };
+    ($lang:ident, $funcs:expr, $classes:expr, $calls:expr, $name:expr, $call:expr, $test_annots:expr) => {
         LangConfig {
             lang: SupportLang::$lang,
             func_kinds: $funcs,
@@ -63,6 +69,7 @@ macro_rules! lang {
             call_kinds: $calls,
             name_strategy: $name,
             call_strategy: $call,
+            test_annotations: $test_annots,
         }
     };
 }
@@ -74,13 +81,17 @@ const LANG_CONFIGS: &[LangConfig] = &[
     lang!(TypeScript, &["function_declaration"], &["class_declaration", "interface_declaration"], &["call_expression"]),
     lang!(Tsx,        &["function_declaration"], &["class_declaration", "interface_declaration"], &["call_expression"]),
     lang!(Go,         &["function_declaration", "method_declaration"], &["type_spec"], &["call_expression"]),
-    lang!(Java,       &["method_declaration"], &["class_declaration", "interface_declaration", "enum_declaration"], &["method_invocation"],
-          NameStrategy::FieldName, CallStrategy::FieldName),
+    lang!(Java,       &["method_declaration", "constructor_declaration"], &["class_declaration", "interface_declaration", "enum_declaration"], &["method_invocation"],
+          NameStrategy::FieldName, CallStrategy::FieldName,
+          &[("marker_annotation", &["Test", "ParameterizedTest", "RepeatedTest"]),
+            ("annotation", &["Test", "ParameterizedTest", "RepeatedTest"])]),
     lang!(C,          &["function_definition"], &["struct_specifier"], &["call_expression"],
           NameStrategy::FieldDeclarator, CallStrategy::FieldFunction),
     lang!(Cpp,        &["function_definition"], &["struct_specifier", "class_specifier"], &["call_expression"],
           NameStrategy::FieldDeclarator, CallStrategy::FieldFunction),
-    lang!(CSharp,     &["method_declaration"], &["class_declaration", "interface_declaration", "struct_declaration", "enum_declaration"], &["invocation_expression"]),
+    lang!(CSharp,     &["method_declaration"], &["class_declaration", "interface_declaration", "struct_declaration", "enum_declaration"], &["invocation_expression"],
+          NameStrategy::FieldName, CallStrategy::FieldFunction,
+          &[("attribute", &["TestMethod", "Fact", "Theory", "Test"])]),
     lang!(Ruby,       &["method"], &["class", "module"], &["call"],
           NameStrategy::FieldName, CallStrategy::FieldMethod),
     lang!(Php,        &["function_definition", "method_declaration"], &["class_declaration", "interface_declaration", "enum_declaration"], &["function_call_expression"]),
@@ -193,6 +204,66 @@ fn leaf_name(node: &Node<'_, StrDoc<SupportLang>>) -> String {
     strip_trailing(&node.text())
 }
 
+/// Check whether a function node has a test annotation (e.g. @Test for Java).
+fn has_test_annotation(
+    node: &Node<'_, StrDoc<SupportLang>>,
+    test_annotations: &[(&str, &[&str])],
+) -> bool {
+    if test_annotations.is_empty() {
+        return false;
+    }
+    // Walk children up to depth 2 (covers modifiers → annotation nesting).
+    for child in node.children() {
+        if check_annotation_node(&child, test_annotations) {
+            return true;
+        }
+        for grandchild in child.children() {
+            if check_annotation_node(&grandchild, test_annotations) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn check_annotation_node(
+    node: &Node<'_, StrDoc<SupportLang>>,
+    test_annotations: &[(&str, &[&str])],
+) -> bool {
+    let kind = node.kind();
+    for &(annot_kind, names) in test_annotations {
+        if &*kind == annot_kind {
+            // Extract annotation name: try "name" field, then first identifier child, then text.
+            let annot_name = node
+                .field("name")
+                .map(|n| n.text().to_string())
+                .or_else(|| {
+                    node.children()
+                        .find(|c| &*c.kind() == "identifier")
+                        .map(|c| c.text().to_string())
+                })
+                .unwrap_or_else(|| {
+                    // Strip leading @ for marker_annotation text like "@Test"
+                    node.text().trim_start_matches('@').to_string()
+                });
+            if names.iter().any(|n| *n == annot_name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check whether a file path looks like a test directory.
+fn is_test_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("/test/")
+        || lower.contains("/tests/")
+        || lower.contains("/__tests__/")
+        || lower.contains("/spec/")
+        || lower.contains("/specs/")
+}
+
 // --- AST-based file processing ---
 
 fn process_code_file(
@@ -228,6 +299,16 @@ fn process_code_file(
                     predicate: "a".into(),
                     object: "Function".into(),
                 });
+                // Detect test functions via annotations or path convention.
+                if has_test_annotation(&node, config.test_annotations)
+                    || is_test_path(&file_path)
+                {
+                    triples.push(Triple {
+                        subject: qualified.clone(),
+                        predicate: "isTestFunction".into(),
+                        object: "true".into(),
+                    });
+                }
                 func_stack.push((qualified, node.range()));
                 continue;
             }
@@ -1726,6 +1807,153 @@ fn extract_debian_dep_name(dep: &str, file_path: &str, triples: &mut Vec<Triple>
     }
 }
 
+// --- Git history ingestion ---
+
+struct FileGitInfo {
+    last_author: String,
+    last_date: String,
+    commit_count: usize,
+    contributors: HashSet<String>,
+}
+
+fn process_git_history(root: &Path, triples: &mut Vec<Triple>, limit: usize) {
+    // Check if this is a git repo.
+    let Ok(check) = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(root)
+        .output()
+    else {
+        return;
+    };
+    if !check.status.success() {
+        return;
+    }
+
+    // Get commit log with file names.
+    let Ok(output) = std::process::Command::new("git")
+        .args([
+            "log",
+            &format!("-n{limit}"),
+            "--format=BERET_COMMIT%H|%an|%aI|%s",
+            "--name-only",
+        ])
+        .current_dir(root)
+        .output()
+    else {
+        return;
+    };
+
+    let log = String::from_utf8_lossy(&output.stdout);
+    let mut file_info: std::collections::HashMap<String, FileGitInfo> = std::collections::HashMap::new();
+
+    for block in log.split("BERET_COMMIT") {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+
+        let mut lines = block.lines();
+        let Some(header) = lines.next() else {
+            continue;
+        };
+
+        // Parse: HASH|AUTHOR|DATE|MESSAGE
+        let parts: Vec<&str> = header.splitn(4, '|').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let hash = parts[0];
+        let author = parts[1];
+        let date = parts[2];
+        let message = parts[3];
+
+        let safe_hash = iri_safe(hash);
+        let safe_author = iri_safe(author);
+        let safe_date = iri_safe(date);
+        let safe_message = iri_safe(message);
+
+        // Commit-level triples.
+        triples.push(Triple {
+            subject: "project".into(),
+            predicate: "hasCommit".into(),
+            object: safe_hash.clone(),
+        });
+        triples.push(Triple {
+            subject: safe_hash.clone(),
+            predicate: "a".into(),
+            object: "Commit".into(),
+        });
+        triples.push(Triple {
+            subject: safe_hash.clone(),
+            predicate: "commitAuthor".into(),
+            object: safe_author.clone(),
+        });
+        triples.push(Triple {
+            subject: safe_hash.clone(),
+            predicate: "commitDate".into(),
+            object: safe_date.clone(),
+        });
+        triples.push(Triple {
+            subject: safe_hash.clone(),
+            predicate: "commitMessage".into(),
+            object: safe_message,
+        });
+
+        // File-level triples from the commit.
+        for line in lines {
+            let file = line.trim();
+            if file.is_empty() {
+                continue;
+            }
+            let safe_file = iri_safe(file);
+            if safe_file.is_empty() {
+                continue;
+            }
+
+            triples.push(Triple {
+                subject: safe_hash.clone(),
+                predicate: "commitTouches".into(),
+                object: safe_file.clone(),
+            });
+
+            let info = file_info.entry(safe_file).or_insert_with(|| FileGitInfo {
+                last_author: safe_author.clone(),
+                last_date: safe_date.clone(),
+                commit_count: 0,
+                contributors: HashSet::new(),
+            });
+            info.commit_count += 1;
+            info.contributors.insert(safe_author.clone());
+        }
+    }
+
+    // Emit per-file aggregate triples.
+    for (file, info) in &file_info {
+        triples.push(Triple {
+            subject: file.clone(),
+            predicate: "lastModifiedBy".into(),
+            object: info.last_author.clone(),
+        });
+        triples.push(Triple {
+            subject: file.clone(),
+            predicate: "lastModifiedDate".into(),
+            object: info.last_date.clone(),
+        });
+        triples.push(Triple {
+            subject: file.clone(),
+            predicate: "commitCount".into(),
+            object: info.commit_count.to_string(),
+        });
+        for contributor in &info.contributors {
+            triples.push(Triple {
+                subject: file.clone(),
+                predicate: "contributedBy".into(),
+                object: contributor.clone(),
+            });
+        }
+    }
+}
+
 // --- Main ingestion pipeline ---
 
 pub fn ingest(root: &Path, store: &CodebaseStore) -> Result<usize, Box<dyn std::error::Error>> {
@@ -1738,7 +1966,11 @@ pub fn ingest(root: &Path, store: &CodebaseStore) -> Result<usize, Box<dyn std::
             triples: &all_triples,
         });
 
-    let triples = all_triples.into_inner().unwrap();
+    let mut triples = all_triples.into_inner().unwrap();
+
+    // Index git history if available.
+    process_git_history(root, &mut triples, 500);
+
     let mut count = 0;
     let mut skipped = 0;
 
@@ -2000,6 +2232,65 @@ mod tests {
 
         let funcs = store.query_to_json("SELECT ?f WHERE { ?f <http://repo.example.org/a> <http://repo.example.org/Function> }").unwrap();
         assert!(funcs.as_array().unwrap().len() >= 2, "expected run + helper");
+    }
+
+    #[test]
+    fn ingest_java_constructors_and_annotations() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create test directory structure mimicking Maven convention
+        let test_dir = dir.path().join("src").join("test").join("java");
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(
+            test_dir.join("AppTest.java"),
+            r#"import org.junit.jupiter.api.Test;
+
+public class AppTest {
+    public AppTest() {}
+
+    @Test
+    public void testRun() {
+        assert(true);
+    }
+
+    @Test
+    public void testHelper() {
+        assert(true);
+    }
+
+    private void setupFixture() {}
+}
+"#,
+        ).unwrap();
+
+        // Also a source file with constructor
+        let src_dir = dir.path().join("src").join("main").join("java");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            src_dir.join("App.java"),
+            "public class App {\n    public App(String name) {}\n    public void run() {}\n}\n",
+        ).unwrap();
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(dir.path(), &store).unwrap();
+
+        // Constructor should be counted as Function
+        let funcs = store.query_to_json("SELECT ?f WHERE { ?f <http://repo.example.org/a> <http://repo.example.org/Function> }").unwrap();
+        let func_list: Vec<&str> = funcs.as_array().unwrap().iter()
+            .filter_map(|r| r.get("f").and_then(|v| v.as_str()))
+            .collect();
+        // App constructor + run + AppTest constructor + testRun + testHelper + setupFixture = 6
+        assert!(func_list.len() >= 6, "expected at least 6 functions, got {}: {:?}", func_list.len(), func_list);
+
+        // @Test annotated methods should have isTestFunction triples
+        let test_funcs = store.query_to_json(
+            "SELECT ?f WHERE { ?f <http://repo.example.org/isTestFunction> <http://repo.example.org/true> }"
+        ).unwrap();
+        let test_list: Vec<&str> = test_funcs.as_array().unwrap().iter()
+            .filter_map(|r| r.get("f").and_then(|v| v.as_str()))
+            .collect();
+        // testRun + testHelper via @Test, plus AppTest constructor + setupFixture via path heuristic
+        // All 4 functions in test dir should be marked, plus 2 have @Test
+        assert!(test_list.len() >= 4, "expected at least 4 test functions, got {}: {:?}", test_list.len(), test_list);
     }
 
     #[test]
@@ -2533,5 +2824,70 @@ require github.com/single/dep v0.1.0
             vals.iter().any(|v| v.contains("devfile")),
             "should detect devfile convention, got {:?}", vals
         );
+    }
+
+    #[test]
+    fn ingest_git_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+
+        // Initialize a git repo and make a couple of commits.
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(d)
+                .env("GIT_AUTHOR_NAME", "Alice")
+                .env("GIT_AUTHOR_EMAIL", "alice@test.com")
+                .env("GIT_COMMITTER_NAME", "Alice")
+                .env("GIT_COMMITTER_EMAIL", "alice@test.com")
+                .output()
+                .unwrap()
+        };
+
+        run(&["init"]);
+        run(&["config", "user.email", "alice@test.com"]);
+        run(&["config", "user.name", "Alice"]);
+
+        fs::write(d.join("hello.py"), "def greet():\n    pass\n").unwrap();
+        run(&["add", "hello.py"]);
+        run(&["commit", "-m", "add hello"]);
+
+        fs::write(d.join("hello.py"), "def greet():\n    print('hi')\n").unwrap();
+        run(&["add", "hello.py"]);
+        run(&["commit", "-m", "update hello"]);
+
+        fs::write(d.join("util.py"), "def helper():\n    pass\n").unwrap();
+        run(&["add", "util.py"]);
+        run(&["commit", "-m", "add util"]);
+
+        let store = CodebaseStore::new().unwrap();
+        ingest(d, &store).unwrap();
+
+        // Should have Commit triples.
+        let commits = store.query_to_json(
+            "SELECT ?c WHERE { ?c <http://repo.example.org/a> <http://repo.example.org/Commit> }"
+        ).unwrap();
+        assert!(commits.as_array().unwrap().len() >= 3, "expected at least 3 commits");
+
+        // hello.py should have commitCount of 2.
+        let counts = store.query_to_json(
+            "SELECT ?count WHERE { ?f <http://repo.example.org/commitCount> ?count . FILTER(CONTAINS(STR(?f), \"hello.py\")) }"
+        ).unwrap();
+        let count_val = counts.as_array().unwrap().first()
+            .and_then(|r| r.get("count"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // Strip IRI wrapper if present.
+        let count_clean = count_val
+            .strip_prefix("<http://repo.example.org/")
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(count_val);
+        assert_eq!(count_clean, "2", "hello.py should have 2 commits, got {}", count_clean);
+
+        // Should have contributedBy triples.
+        let contributors = store.query_to_json(
+            "SELECT ?author WHERE { ?f <http://repo.example.org/contributedBy> ?author . FILTER(CONTAINS(STR(?f), \"hello.py\")) }"
+        ).unwrap();
+        assert!(!contributors.as_array().unwrap().is_empty(), "expected contributor for hello.py");
     }
 }
