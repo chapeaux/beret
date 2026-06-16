@@ -32,6 +32,7 @@ beret/
 beret [COMMAND] [PATH]          # CLI mode (indexes, runs command, prints JSON)
 beret [PATH]                    # MCP stdio mode
 beret --serve [HOST:]PORT       # MCP HTTP/SSE mode
+beret describe --exclude node_modules --exclude target   # exclude paths during indexing
 ```
 
 ### CLI Commands
@@ -50,11 +51,13 @@ beret --serve [HOST:]PORT       # MCP HTTP/SSE mode
 
 All commands default to the current directory if `[PATH]` is omitted. Output is JSON to stdout; progress/errors go to stderr.
 
+`--exclude PATTERN` can be used with any command (repeatable) to skip paths during indexing using gitignore-style patterns. In MCP stdio mode, `--exclude` patterns are applied as defaults to every `refresh_index` call.
+
 ## Module Details
 
 ### main.rs — CLI + MCP Server
 - **Crate name:** `chapeaux-beret`, **binary name:** `beret`
-- Custom CLI parser with `--serve`, `--help`, `--version`, and subcommands
+- Custom CLI parser with `--serve`, `--help`, `--version`, `--exclude`, and subcommands
 - Three modes: **CLI** (direct commands), **Stdio** (MCP over stdin/stdout), **HTTP** (MCP over SSE)
 - CLI mode: `run_cli()` — indexes the directory, runs the requested tool, prints JSON to stdout
 - MCP modes: graph starts empty until `refresh_index` is called
@@ -95,6 +98,7 @@ All commands default to the current directory if `[PATH]` is omitted. Output is 
 - `clear()` — wipes store
 
 ### ingestor.rs — Parallel Ingestion + Practice Detection + Git History
+- `ingest(root, store, exclude)` — main entry point; `exclude: &[String]` takes gitignore-style patterns to skip during the walk (uses `ignore::overrides::OverrideBuilder`)
 - `hidden(false)` — walks dotfiles (`.github/`, `.eslintrc`, etc.) for practice detection
 - Four extraction tiers: **AST** (17 languages), **Build files** (20+ manifest types), **Non-code text** (JSON, YAML, Markdown, HTML, CSS, AsciiDoc, reStructuredText, man pages), **Binary metadata**
 - **AST extraction**: `LangConfig` per language specifies `func_kinds`, `class_kinds`, `call_kinds`, name/call extraction strategies, and `test_annotations`
@@ -143,7 +147,7 @@ All list-returning tools support `limit`, `offset`, and `exclude` parameters.
 ### Always available
 | Tool | Default limit | Purpose |
 |------|--------------|---------|
-| `refresh_index` | — | Index a directory (optional `path` param). Call this first. |
+| `refresh_index` | — | Index a directory (optional `path` and `exclude` params). Call this first. `exclude` takes comma-separated gitignore-style patterns. |
 | `query_codebase` | 500 | Raw SPARQL queries |
 | `find_symbol` | 100 | Find definitions by name (partial match) |
 | `find_callers` | 100 | Reverse call graph (name optional — omit for all edges) |

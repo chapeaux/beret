@@ -22,9 +22,9 @@ use crate::store::CodebaseStore;
 // --- CLI parsing ---
 
 enum Mode {
-    Stdio { root: PathBuf },
+    Stdio { root: PathBuf, exclude: Vec<String> },
     Http { host: String, port: u16 },
-    Cli { root: PathBuf, command: CliCommand },
+    Cli { root: PathBuf, command: CliCommand, exclude: Vec<String> },
 }
 
 enum CliCommand {
@@ -59,6 +59,7 @@ Commands:
   diagram [PATH]          Generate LikeC4 architecture diagram
 
 Options:
+  --exclude PATTERN     Exclude paths matching a gitignore-style pattern (repeatable)
   --serve [HOST:]PORT   Start HTTP/SSE server (MCP over SSE)
   --help                Show this help message
   --version             Show version
@@ -70,6 +71,7 @@ Examples:
   beret describe                  # analyze current directory
   beret activity /path/to/repo    # git activity for a repo
   beret find main                 # find symbols named 'main'
+  beret describe --exclude node_modules --exclude target
   beret query 'SELECT ?s WHERE {{ ?s <http://repo.example.org/a> <http://repo.example.org/Function> }}'
   beret --serve 8080              # HTTP/SSE MCP server on port 8080"
     );
@@ -78,6 +80,19 @@ Examples:
 fn parse_args() -> std::result::Result<Mode, Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
+    let mut exclude: Vec<String> = Vec::new();
+
+    // First pass: collect --exclude flags
+    while i < args.len() {
+        if args[i] == "--exclude" {
+            i += 1;
+            let pattern = args.get(i).ok_or("--exclude requires a pattern")?;
+            exclude.push(pattern.clone());
+        } else {
+            break;
+        }
+        i += 1;
+    }
 
     while i < args.len() {
         match args[i].as_str() {
@@ -102,6 +117,11 @@ fn parse_args() -> std::result::Result<Mode, Box<dyn std::error::Error>> {
                 };
                 return Ok(Mode::Http { host, port });
             }
+            "--exclude" => {
+                i += 1;
+                let pattern = args.get(i).ok_or("--exclude requires a pattern")?;
+                exclude.push(pattern.clone());
+            }
             // CLI subcommands
             "describe" | "activity" | "testing" | "architecture" | "dependencies"
             | "practices" | "stats" | "diagram" => {
@@ -116,26 +136,60 @@ fn parse_args() -> std::result::Result<Mode, Box<dyn std::error::Error>> {
                     "diagram" => CliCommand::Diagram,
                     _ => unreachable!(),
                 };
-                let root = args.get(i + 1)
-                    .map(PathBuf::from)
-                    .unwrap_or(std::env::current_dir()?);
-                return Ok(Mode::Cli { root, command });
+                i += 1;
+                // Collect remaining --exclude flags and optional path
+                let mut root = None;
+                while i < args.len() {
+                    if args[i] == "--exclude" {
+                        i += 1;
+                        if let Some(pattern) = args.get(i) {
+                            exclude.push(pattern.clone());
+                        }
+                    } else if root.is_none() && !args[i].starts_with('-') {
+                        root = Some(PathBuf::from(&args[i]));
+                    }
+                    i += 1;
+                }
+                let root = root.unwrap_or(std::env::current_dir()?);
+                return Ok(Mode::Cli { root, command, exclude });
             }
             "query" => {
                 i += 1;
                 let sparql = args.get(i).ok_or("query requires a SPARQL string")?.clone();
-                let root = args.get(i + 1)
-                    .map(PathBuf::from)
-                    .unwrap_or(std::env::current_dir()?);
-                return Ok(Mode::Cli { root, command: CliCommand::Query { sparql } });
+                i += 1;
+                let mut root = None;
+                while i < args.len() {
+                    if args[i] == "--exclude" {
+                        i += 1;
+                        if let Some(pattern) = args.get(i) {
+                            exclude.push(pattern.clone());
+                        }
+                    } else if root.is_none() && !args[i].starts_with('-') {
+                        root = Some(PathBuf::from(&args[i]));
+                    }
+                    i += 1;
+                }
+                let root = root.unwrap_or(std::env::current_dir()?);
+                return Ok(Mode::Cli { root, command: CliCommand::Query { sparql }, exclude });
             }
             "find" => {
                 i += 1;
                 let name = args.get(i).ok_or("find requires a symbol name")?.clone();
-                let root = args.get(i + 1)
-                    .map(PathBuf::from)
-                    .unwrap_or(std::env::current_dir()?);
-                return Ok(Mode::Cli { root, command: CliCommand::Find { name } });
+                i += 1;
+                let mut root = None;
+                while i < args.len() {
+                    if args[i] == "--exclude" {
+                        i += 1;
+                        if let Some(pattern) = args.get(i) {
+                            exclude.push(pattern.clone());
+                        }
+                    } else if root.is_none() && !args[i].starts_with('-') {
+                        root = Some(PathBuf::from(&args[i]));
+                    }
+                    i += 1;
+                }
+                let root = root.unwrap_or(std::env::current_dir()?);
+                return Ok(Mode::Cli { root, command: CliCommand::Find { name }, exclude });
             }
             arg if arg.starts_with('-') => {
                 return Err(format!("unknown option: {arg}").into());
@@ -143,13 +197,16 @@ fn parse_args() -> std::result::Result<Mode, Box<dyn std::error::Error>> {
             path => {
                 return Ok(Mode::Stdio {
                     root: PathBuf::from(path),
+                    exclude,
                 });
             }
         }
+        i += 1;
     }
 
     Ok(Mode::Stdio {
         root: std::env::current_dir()?,
+        exclude,
     })
 }
 
@@ -231,7 +288,10 @@ fn all_tools(http_mode: bool) -> Vec<Tool> {
              indexes that directory. If omitted, re-indexes the last indexed directory \
              (or the current working directory if nothing has been indexed yet). \
              Call this before using any other tool to populate the graph.",
-            &[("path", "string", "Directory path to index (defaults to last indexed path or cwd)")],
+            &[
+                ("path", "string", "Directory path to index (defaults to last indexed path or cwd)"),
+                ("exclude", "string", "Comma-separated gitignore-style patterns to exclude from indexing (e.g. 'node_modules,target,*.generated.*')"),
+            ],
             &[],
         ),
         tool(
@@ -445,6 +505,7 @@ struct BeretHandler {
     store: Arc<CodebaseStore>,
     root: std::sync::RwLock<PathBuf>,
     http_mode: bool,
+    default_exclude: Vec<String>,
 }
 
 impl BeretHandler {
@@ -558,7 +619,7 @@ impl BeretHandler {
         }
     }
 
-    fn do_refresh(&self, path: Option<&str>) -> std::result::Result<String, String> {
+    fn do_refresh(&self, path: Option<&str>, exclude: &[String]) -> std::result::Result<String, String> {
         if let Some(p) = path {
             let resolved = std::path::Path::new(p)
                 .canonicalize()
@@ -566,8 +627,12 @@ impl BeretHandler {
             *self.root.write().unwrap() = resolved;
         }
         let root = self.root.read().unwrap().clone();
+        let all_exclude: Vec<String> = self.default_exclude.iter()
+            .chain(exclude.iter())
+            .cloned()
+            .collect();
         self.store.clear().map_err(|e| e.to_string())?;
-        let count = ingest(&root, &self.store).map_err(|e| e.to_string())?;
+        let count = ingest(&root, &self.store, &all_exclude).map_err(|e| e.to_string())?;
         Ok(format!("Indexed {} triples from {}", count, root.display()))
     }
 
@@ -593,7 +658,7 @@ impl BeretHandler {
 
         *self.root.write().unwrap() = temp_dir.clone();
         self.store.clear().map_err(|e| e.to_string())?;
-        let count = ingest(&temp_dir, &self.store).map_err(|e| e.to_string())?;
+        let count = ingest(&temp_dir, &self.store, &[]).map_err(|e| e.to_string())?;
         Ok(format!("Cloned and indexed {} triples from {}", count, url))
     }
 }
@@ -637,7 +702,8 @@ impl ServerHandler for BeretHandler {
 
             "refresh_index" => {
                 let path = Self::get_arg(&params, "path");
-                match self.do_refresh(path) {
+                let exclude = Self::get_exclude(&params);
+                match self.do_refresh(path, &exclude) {
                     Ok(msg) => Self::ok_text(msg),
                     Err(e) => Err(Self::err(format!("Refresh error: {e}"))),
                 }
@@ -836,12 +902,12 @@ fn make_server_details() -> InitializeResult {
     }
 }
 
-fn run_cli(root: PathBuf, command: CliCommand) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn run_cli(root: PathBuf, command: CliCommand, exclude: Vec<String>) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let store = CodebaseStore::new()?;
     let root = std::fs::canonicalize(&root)?;
 
     eprintln!("Indexing {}...", root.display());
-    let count = ingest(&root, &store)?;
+    let count = ingest(&root, &store, &exclude)?;
     eprintln!("Indexed {} triples.", count);
 
     let result: std::result::Result<Value, String> = match command {
@@ -875,7 +941,7 @@ fn run_cli(root: PathBuf, command: CliCommand) -> std::result::Result<(), Box<dy
     Ok(())
 }
 
-async fn run_stdio(root: PathBuf) -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn run_stdio(root: PathBuf, exclude: Vec<String>) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(CodebaseStore::new()?);
 
     eprintln!("Beret: ready (use refresh_index to scan a directory)");
@@ -884,6 +950,7 @@ async fn run_stdio(root: PathBuf) -> std::result::Result<(), Box<dyn std::error:
         store,
         root: std::sync::RwLock::new(root),
         http_mode: false,
+        default_exclude: exclude,
     };
 
     let transport = StdioTransport::new(TransportOptions::default())?;
@@ -912,6 +979,7 @@ async fn run_http(
         store,
         root: std::sync::RwLock::new(std::env::temp_dir()),
         http_mode: true,
+        default_exclude: Vec::new(),
     };
 
     let options = HyperServerOptions {
@@ -938,8 +1006,8 @@ async fn run_http(
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     match parse_args()? {
-        Mode::Stdio { root } => run_stdio(root).await,
+        Mode::Stdio { root, exclude } => run_stdio(root, exclude).await,
         Mode::Http { host, port } => run_http(host, port).await,
-        Mode::Cli { root, command } => run_cli(root, command),
+        Mode::Cli { root, command, exclude } => run_cli(root, command, exclude),
     }
 }

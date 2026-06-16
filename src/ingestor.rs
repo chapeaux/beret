@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use ast_grep_core::tree_sitter::StrDoc;
 use ast_grep_core::Node;
 use ast_grep_language::{LanguageExt, SupportLang};
+use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 
 use crate::store::CodebaseStore;
@@ -1956,12 +1957,21 @@ fn process_git_history(root: &Path, triples: &mut Vec<Triple>, limit: usize) {
 
 // --- Main ingestion pipeline ---
 
-pub fn ingest(root: &Path, store: &CodebaseStore) -> Result<usize, Box<dyn std::error::Error>> {
+pub fn ingest(root: &Path, store: &CodebaseStore, exclude: &[String]) -> Result<usize, Box<dyn std::error::Error>> {
     let all_triples: Mutex<Vec<Triple>> = Mutex::new(Vec::new());
 
-    WalkBuilder::new(root)
-        .hidden(false)
-        .build_parallel()
+    let mut builder = WalkBuilder::new(root);
+    builder.hidden(false);
+
+    if !exclude.is_empty() {
+        let mut overrides = OverrideBuilder::new(root);
+        for pattern in exclude {
+            overrides.add(&format!("!{pattern}"))?;
+        }
+        builder.overrides(overrides.build()?);
+    }
+
+    builder.build_parallel()
         .visit(&mut TripleVisitorBuilder {
             triples: &all_triples,
         });
@@ -2130,7 +2140,7 @@ mod tests {
     fn ingest_finds_functions() {
         let dir = setup_test_dir();
         let store = CodebaseStore::new().unwrap();
-        let count = ingest(dir.path(), &store).unwrap();
+        let count = ingest(dir.path(), &store, &[]).unwrap();
         assert!(count > 0, "should have found triples");
 
         let json = store
@@ -2146,7 +2156,7 @@ mod tests {
     fn ingest_finds_classes() {
         let dir = setup_test_dir();
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let json = store
             .query_to_json(
@@ -2161,7 +2171,7 @@ mod tests {
     fn ingest_finds_calls() {
         let dir = setup_test_dir();
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let json = store
             .query_to_json(
@@ -2177,9 +2187,9 @@ mod tests {
         let dir = setup_test_dir();
         let store = CodebaseStore::new().unwrap();
 
-        let count1 = ingest(dir.path(), &store).unwrap();
+        let count1 = ingest(dir.path(), &store, &[]).unwrap();
         store.clear().unwrap();
-        let count2 = ingest(dir.path(), &store).unwrap();
+        let count2 = ingest(dir.path(), &store, &[]).unwrap();
         assert_eq!(count1, count2);
     }
 
@@ -2192,7 +2202,7 @@ mod tests {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let funcs = store.query_to_json("SELECT ?f WHERE { ?f <http://repo.example.org/a> <http://repo.example.org/Function> }").unwrap();
         assert!(funcs.as_array().unwrap().len() >= 1);
@@ -2210,7 +2220,7 @@ mod tests {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let funcs = store.query_to_json("SELECT ?f WHERE { ?f <http://repo.example.org/a> <http://repo.example.org/Function> }").unwrap();
         assert!(funcs.as_array().unwrap().len() >= 2, "expected main + helper");
@@ -2225,7 +2235,7 @@ mod tests {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let classes = store.query_to_json("SELECT ?c WHERE { ?c <http://repo.example.org/a> <http://repo.example.org/Class> }").unwrap();
         assert!(classes.as_array().unwrap().len() >= 1, "expected App class");
@@ -2271,7 +2281,7 @@ public class AppTest {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         // Constructor should be counted as Function
         let funcs = store.query_to_json("SELECT ?f WHERE { ?f <http://repo.example.org/a> <http://repo.example.org/Function> }").unwrap();
@@ -2302,7 +2312,7 @@ public class AppTest {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let funcs = store.query_to_json("SELECT ?f WHERE { ?f <http://repo.example.org/a> <http://repo.example.org/Function> }").unwrap();
         assert!(funcs.as_array().unwrap().len() >= 2, "expected main + helper");
@@ -2317,7 +2327,7 @@ public class AppTest {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let configs = store.query_to_json("SELECT ?c WHERE { ?c <http://repo.example.org/a> <http://repo.example.org/Config> }").unwrap();
         assert_eq!(configs.as_array().unwrap().len(), 1);
@@ -2335,7 +2345,7 @@ public class AppTest {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let sections = store.query_to_json("SELECT ?s WHERE { ?s <http://repo.example.org/a> <http://repo.example.org/Section> }").unwrap();
         assert!(sections.as_array().unwrap().len() >= 3, "expected 3 headings");
@@ -2348,7 +2358,7 @@ public class AppTest {
         fs::write(dir.path().join("data.pdf"), b"fake pdf data").unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let binaries = store.query_to_json("SELECT ?b WHERE { ?b <http://repo.example.org/a> <http://repo.example.org/Binary> }").unwrap();
         assert_eq!(binaries.as_array().unwrap().len(), 2);
@@ -2369,7 +2379,7 @@ public class AppTest {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let styles = store.query_to_json("SELECT ?s WHERE { ?s <http://repo.example.org/a> <http://repo.example.org/Style> }").unwrap();
         assert!(styles.as_array().unwrap().len() >= 3, "expected body, .container, #app");
@@ -2388,7 +2398,7 @@ public class AppTest {
 
         let store = CodebaseStore::new().unwrap();
         let start = std::time::Instant::now();
-        let count = ingest(dir.path(), &store).unwrap();
+        let count = ingest(dir.path(), &store, &[]).unwrap();
         let elapsed = start.elapsed();
 
         assert!(
@@ -2420,7 +2430,7 @@ public class AppTest {
         fs::write(dir.path().join("tests/app.test.js"), "test('it', () => {})").unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         // Check CI/CD detection
         let ci = store.query_to_json(
@@ -2483,7 +2493,7 @@ public class AppTest {
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         // Should detect dependencies
         let deps = store.query_to_json(
@@ -2524,7 +2534,7 @@ tempfile = "3"
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let deps = store.query_to_json(
             "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
@@ -2552,7 +2562,7 @@ require github.com/single/dep v0.1.0
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let deps = store.query_to_json(
             "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
@@ -2570,7 +2580,7 @@ require github.com/single/dep v0.1.0
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let deps = store.query_to_json(
             "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
@@ -2593,7 +2603,7 @@ require github.com/single/dep v0.1.0
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let deps = store.query_to_json(
             "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
@@ -2611,7 +2621,7 @@ require github.com/single/dep v0.1.0
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let deps = store.query_to_json(
             "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
@@ -2632,7 +2642,7 @@ require github.com/single/dep v0.1.0
         fs::write(dir.path().join("Chart.yaml"), "apiVersion: v2").unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         // Deployment platform
         let deploy = store.query_to_json(
@@ -2696,7 +2706,7 @@ require github.com/single/dep v0.1.0
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let deps = store.query_to_json(
             "SELECT ?dep WHERE { ?f <http://repo.example.org/dependsOn> ?dep }"
@@ -2720,7 +2730,7 @@ require github.com/single/dep v0.1.0
         ).unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let docs = store.query_to_json(
             "SELECT ?d WHERE { ?d <http://repo.example.org/a> <http://repo.example.org/Document> }"
@@ -2755,7 +2765,7 @@ require github.com/single/dep v0.1.0
         fs::write(dir.path().join("tox.ini"), "[tox]\nenvlist = py39\n").unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         // systemd convention
         let conv = store.query_to_json(
@@ -2812,7 +2822,7 @@ require github.com/single/dep v0.1.0
         fs::write(dir.path().join("devfile.yaml"), "schemaVersion: 2.3.0").unwrap();
 
         let store = CodebaseStore::new().unwrap();
-        ingest(dir.path(), &store).unwrap();
+        ingest(dir.path(), &store, &[]).unwrap();
 
         let conv = store.query_to_json(
             "SELECT ?v WHERE { <http://repo.example.org/project> <http://repo.example.org/followsConvention> ?v }"
@@ -2861,7 +2871,7 @@ require github.com/single/dep v0.1.0
         run(&["commit", "-m", "add util"]);
 
         let store = CodebaseStore::new().unwrap();
-        ingest(d, &store).unwrap();
+        ingest(d, &store, &[]).unwrap();
 
         // Should have Commit triples.
         let commits = store.query_to_json(
